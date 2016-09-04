@@ -1,1 +1,42 @@
-/opt/data/develop/scripts/vdr-auto
+#!/bin/bash
+# Shell script to handle VDR post-recording actions, like noad, H264 conversions
+# Based on VDR example
+#------------------------------------------------------------------------------
+# Revision History
+#
+# Removed --asd as it was moving the cut marks to the wrong places
+# Removd -C (scene change detection) which seems to mess up marks unecessarily
+#------------------------------------------------------------------------------
+#
+# $Log: vdr-auto,v $
+# Revision 1.1  2016/09/01 12:35:23  richard
+# Initial import
+#
+#------------------------------------------------------------------------------
+
+case "$1" in
+     before)
+            echo "Before recording $2"
+            ;;
+     started)
+            echo "Started recording $2"
+			/usr/local/bin/noad -s /etc/vdr/noadstat.csv -o -c $1 $2
+            ;;
+     after)
+            echo "After recording $2"
+            #vdr forks this script, noad forks itself, vdr-convert doesn't
+            /usr/local/bin/noad -s /etc/vdr/noadstat.csv -o -c  $1 $2
+            /usr/local/bin/vdr-convert -k -d -i $2 &
+            ;;
+     edited)
+            echo "Edited recording $2"
+            ;;
+     deleted)
+            echo "Deleted recording $2"
+            ;;
+     *)
+            echo "ERROR: unknown state: $1"
+            ;;
+esac
+
+# --------- $Id: vdr-auto,v 1.1 2016/09/01 12:35:23 richard Exp $ ---------- END

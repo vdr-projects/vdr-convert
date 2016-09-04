@@ -1,1 +1,12 @@
-/opt/data/develop/vdr/vdr-220/patches/VDR2.20-increase-frame-detector-for-x264.patch
+--- remux.c	2016-09-01 14:53:42.969255952 +0100
++++ new/remux.c	2016-06-30 17:06:06.000000000 +0100
+@@ -23,7 +23,8 @@
+ #define dbgpatpmt(a...) if (DebugPatPmt) fprintf(stderr, a)
+ #define dbgframes(a...) if (DebugFrames) fprintf(stderr, a)
+ 
+-#define MAX_TS_PACKETS_FOR_VIDEO_FRAME_DETECTION 6
++//RF fix for x264 long commnd line header #define MAX_TS_PACKETS_FOR_VIDEO_FRAME_DETECTION 6
++#define MAX_TS_PACKETS_FOR_VIDEO_FRAME_DETECTION 10
+ #define WRN_TS_PACKETS_FOR_VIDEO_FRAME_DETECTION (MAX_TS_PACKETS_FOR_VIDEO_FRAME_DETECTION / 2)
+ #define WRN_TS_PACKETS_FOR_FRAME_DETECTOR (MIN_TS_PACKETS_FOR_FRAME_DETECTOR / 2)
+ 

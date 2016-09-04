@@ -1,1 +1,90 @@
-/opt/data/develop/vdr/vdr-220/patches/VDR2.20-proposal-to-fix-index-generation-for-radio-recording.patch
+>From ecfdf422cb4d7e88088cfb740197e684adb69966 Mon Sep 17 00:00:00 2001
+From: Thomas Reufer <thomas@reufer.ch>
+Date: Mon, 13 Jun 2016 16:42:03 +0200
+Subject: [PATCH 9/9] proposal to fix index generation for radio recordings
+
+---
+ recording.c | 8 ++++----
+ remux.c     | 4 +++-
+ remux.h     | 3 +++
+ 3 files changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/recording.c b/recording.c
+index a847c7d..b1b7c81 100644
+--- a/recording.c
++++ b/recording.c
+@@ -2324,7 +2324,7 @@ void cIndexFileGenerator::Action(void)
+                  Buffer.Del(Processed);
+                  }
+               }
+-           else if (PatPmtParser.Vpid()) {
++           else if (PatPmtParser.Completed()) {
+               // Step 2 - sync FrameDetector:
+               int Processed = FrameDetector.Analyze(Data, Length);
+               if (Processed > 0) {
+@@ -2346,9 +2346,9 @@ void cIndexFileGenerator::Action(void)
+                        PatPmtParser.ParsePmt(p, TS_SIZE);
+                     Length -= TS_SIZE;
+                     p += TS_SIZE;
+-                    if (PatPmtParser.Vpid()) {
+-                       // Found Vpid, so rewind to sync FrameDetector:
+-                       FrameDetector.SetPid(PatPmtParser.Vpid(), PatPmtParser.Vtype());
++                    if (PatPmtParser.Completed()) {
++                       // Found pid, so rewind to sync FrameDetector:
++                       FrameDetector.SetPid(PatPmtParser.Vpid() ? PatPmtParser.Vpid() : PatPmtParser.Apid(0), PatPmtParser.Vpid() ? PatPmtParser.Vtype() : PatPmtParser.Atype(0));
+                        BufferChunks = IFG_BUFFER_SIZE;
+                        Rewind = true;
+                        break;
+diff --git a/remux.c b/remux.c
+index cfb6ae3..df38add 100644
+--- a/remux.c
++++ b/remux.c
+@@ -603,6 +603,7 @@ cPatPmtParser::cPatPmtParser(bool UpdatePrimaryDevice)
+ 
+ void cPatPmtParser::Reset(void)
+ {
++  completed = false;
+   pmtSize = 0;
+   patVersion = pmtVersion = -1;
+   pmtPids[0] = 0;
+@@ -893,6 +894,7 @@ void cPatPmtParser::ParsePmt(const uchar *Data, int Length)
+             }
+          }
+      pmtVersion = Pmt.getVersionNumber();
++     completed = true;
+      }
+   else
+      esyslog("ERROR: can't parse PMT");
+@@ -1541,7 +1543,7 @@ void cFrameDetector::SetPid(int Pid, int Type)
+      parser = new cH264Parser;
+   else if (type == 0x24)
+      parser = new cH265Parser;
+-  else if (type == 0x04 || type == 0x06) // MPEG audio or AC3 audio
++  else if (type == 0x03 || type == 0x04 || type == 0x06 || type == 0x0F || type == 0x11) // MPEG2,4 AAC, AC3 audio
+      parser = new cAudioParser;
+   else if (type != 0)
+      esyslog("ERROR: unknown stream type %d (PID %d) in frame detector", type, pid);
+diff --git a/remux.h b/remux.h
+index bd0d145..80528bd 100644
+--- a/remux.h
++++ b/remux.h
+@@ -361,6 +361,7 @@ private:
+   uint16_t compositionPageIds[MAXSPIDS];
+   uint16_t ancillaryPageIds[MAXSPIDS];
+   bool updatePrimaryDevice;
++  bool completed;
+ protected:
+   int SectionLength(const uchar *Data, int Length) { return (Length >= 3) ? ((int(Data[1]) & 0x0F) << 8)| Data[2] : 0; }
+ public:
+@@ -397,6 +398,8 @@ public:
+   int Vtype(void) const { return vtype; }
+        ///< Returns the video stream type as defined by the current PMT, or 0 if no video
+        ///< stream type has been detected, yet.
++  bool Completed(void) { return completed; }
++       ///< Returns true if the PMT has been completely parsed
+   const int *Apids(void) const { return apids; }
+   const int *Dpids(void) const { return dpids; }
+   const int *Spids(void) const { return spids; }
+-- 
+2.4.9
+
