@@ -74,6 +74,9 @@
 #------------------------------------------------------------------------------
 #
 # $Log: vdr-convert,v $
+# Revision 1.4  2016/09/26 10:19:06  richard
+# Improvement to subtitle failure logic (prefer ffmpeg status to size)
+#
 # Revision 1.3  2016/09/01 13:01:48  richard
 # Added support for VDR1.x files
 # Added extensive support for dvb subtitles
@@ -114,6 +117,7 @@
 
 #This is for detailed ffmpeg output
 LOGFILE="/var/log/vdr-convert.log"
+log_facility="local2.warn"
 #ffmpeg="timeout -k 5h 4h nice -n 19 /opt/data/develop/FFmpeg/ffmpeg -y -hide_banner -nostats -probesize 250M -analyzeduration 600M -copytb 1"
 # Timeout req'd for troublesome conversions where ffmpeg can (rarely) get stuck. However causes issues when run interactively.
 ffmpeg="nice -n 19 /opt/data/develop/FFmpeg/ffmpeg -y -hide_banner -nostats -probesize 250M -analyzeduration 600M -copytb 1"
@@ -159,7 +163,7 @@ function quit() {
 
 #------------------------------------------------------------------------------
 function logit() {
-  logger -s -p local2.warn -t vdr-convert "$1"
+  logger -s -p $log_facility -t vdr-convert "$1"
 }
 
 #------------------------------------------------------------------------------
@@ -173,7 +177,8 @@ function progduration {
   fi
   if [ $duration ]; then
     echo;echo "Duration is $duration seconds"
-    minsubsize=$(($duration / 9))    # 400k / hr absolute min (empirical)
+    minsubsize=$(($duration * 2))
+    minsubsize=$(($minsubsize / 17))   # 425k / hr absolute min (empirical)
   fi
 }
 
@@ -313,23 +318,18 @@ function map() {
       # Broken subs streams WILL cause an early exit, so test them quickly : both ability to copy & their size
       # (Skip any dvd_sub misidentified in old VDR recordings - e.g. if .vdr files passed unprocessed)
       # Can be multiple streams.
+      # Quit rather than continue otherwise subs could be lost.
       echo;echo "Testing subtitles for problems..."
       substest=$(eval "$ffmpeg -i "\"$1"\" -vn -an -dn -c:s copy -f mpegts /dev/null 2>&1")
       [ $? -ne 0 ] && logit "ffmpeg failed subtitles stream test" && quit 1
       subslen=$(echo "$substest" |grep "subtitle:"|cut -f4 -d":"|sed 's/[^0-9]*//g')
-      # arbitrary size check, but generally produces little if broken
-      if [ $subslen -ge $minsubsize ]; then
-        echo "Subs length $subslen kbytes OK"
-        mapst="$mapst L:10000:$stream_id"
-        H_SUBS="$H_SUBS -s $stream_id"
-        SUBS[$stream_id]="-c:s:stream_op copy -metadata:s:s:stream_op language=$Slang"
-        # Unsure if forcing dvbsub causes trouble. Usually unhelpful: results in different size o/p
-        # SUBS[$stream_id]="-c:s:stream_op dvbsub -metadata:s:s:stream_op language=$Slang"
-      else
-        logit "Warning ffmpeg failed subtitles stream in $1: too small ($subslen kb), none or broken: no subtitles output"
-        # If VDR2, perhaps not possible to transcode with subs. VDR1.x size already assessed, shouldn't get here
-        [ ! $VDRtype ] && [ $delete -eq 1 ] && delete=0 && logit "No longer deleting originals for $1 due to suspect subtitle stream size"
-      fi
+      # Now we rely just on the test above. If ffmpeg says OK, it's OK
+      echo "Subs length $subslen kbytes OK"
+      mapst="$mapst L:10000:$stream_id"
+      H_SUBS="$H_SUBS -s $stream_id"
+      SUBS[$stream_id]="-c:s:stream_op copy -metadata:s:s:stream_op language=$Slang"
+      # Unsure if forcing dvbsub causes trouble. Usually unhelpful: results in different size o/p
+      # SUBS[$stream_id]="-c:s:stream_op dvbsub -metadata:s:s:stream_op language=$Slang"
 	fi
   done
 
@@ -410,20 +410,23 @@ function convertvdr() {
 
       # Subs stream
       if [ $subs -eq 1 ]; then
-        if [ $subxsize -gt $minsubsize ]; then
-          # Subs streams: MUST DO SEPARATELY as ffmpeg has big problems extracting ALL the subs and AD sparse packets
-          # (cannot currently convert a small filtered subs-only file - doesn't work)
-          # Many players also have this problem - esp if the video stream is present.
-          # After exhaustive testing with many flags / options, atm there's NO other way to avoid this and reliably extract ALL dvbsubs
-          subsfile="$tempdir/subs.ts"
-          cmd="$ffmpeg -copyts -i "\"$tmpts"\" -c:s copy -vn -an -dn "\"$subsfile"\""
-          sh -c $cmd
-          if [ $? -ne 0 ]; then
-            logit "Fail: ffmpeg problem extracting subs stream(s) of $tmpts, deleting $subsfile (check $LOGFILE)"
-            [ $debug -eq 0 ] && rm -f "$subsfile" || logit "could not remove $subsfile"
-            return 1
+        # Subs streams: MUST DO SEPARATELY as ffmpeg has big problems extracting ALL the subs and AD sparse packets
+        # (cannot currently convert a small filtered subs-only file - doesn't work)
+        # Many players also have this problem - esp if the video stream is present.
+        # After exhaustive testing with many flags / options, atm there's NO other way to avoid this and reliably extract ALL dvbsubs
+        subsfile="$tempdir/subs.ts"
+        cmd="$ffmpeg -copyts -i "\"$tmpts"\" -c:s copy -vn -an -dn "\"$subsfile"\""
+        # Now we do the ffmpeg extract anyway, in case it was really OK, and only fail if it *should* have been OK
+        # (i.e. genindex extracted more than minimum expected). ffmpeg will fail it if stream is empty
+        sh -c $cmd
+        if [ $? -ne 0 ]; then
+          [ $debug -eq 0 ] && rm -f "$subsfile" || logit "could not remove $subsfile"
+          if [ $subxsize -gt $minsubsize ]; then
+            logit "Fail: ffmpeg problem extracting subs stream(s) of $tmpts (check $LOGFILE)" && return 1
+          else
+            logit "Warning: only $subxsize kb subtitles in $1 (VDR 1.x), expected min. $minsubsize kb: none/broken/only in ads: none converted"
           fi
-
+        else
           # add and map the extra subs file, so the main conversion catches it, check ffmpeg didn't drop more than 10kb subs (~1 sub)
           map $subsfile 1
           [ $subxsize -gt $(($subslen+10)) ] && logit "Fail: ffmpeg did not process all subs for $1 (VDR 1.x, $subslen kb processed, $subxsize kb extracted), deleting $tempdir !" && rm -rf "$tempdir" && return 1
@@ -432,8 +435,6 @@ function convertvdr() {
           map="-i \"$subsfile\" $F_SUBS $map"
           echo;echo "Final subs map is $map"
           echo
-        else
-          logit "Warning: only $subxsize kb subtitles in $1 (VDR 1.x), expected min. $minsubsize kb: none/broken/only in ads: none converted"
         fi
       else
         logit "Skipping subtitles in $1 per command"
@@ -828,7 +829,7 @@ if [[ $redo -eq 0 && $MERGEFILES ]]; then
         quit 1
       fi
       # check for silly compression ratio (converted less than 3/8 of original, or larger, heaven forbid!)
-      if [ $(($totalsize * 3)) -gt $(($size * 8)) -o $size -ge $totalsize -a $mpeg -eq 0 ]; then
+      if [ $(($totalsize * 3)) -gt $(($size * 8)) -o $size -gt $totalsize -a $mpeg -eq 0 ]; then
         logit "Possible fail: Suspect size of $OUTFILE, (new $(($size/$meg))M vs. original $(($totalsize/$meg))M)"
         # keep converted outfile, actually it may be OK
         cleanup
@@ -920,4 +921,4 @@ fi
 # remove lockfile
 quit 0
 
-# --------- $Id: vdr-convert,v 1.3 2016/09/01 13:01:48 richard Exp $ ---------- END
+# --------- $Id: vdr-convert,v 1.4 2016/09/26 10:19:06 richard Exp $ ---------- END
