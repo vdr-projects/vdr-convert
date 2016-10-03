@@ -8,6 +8,9 @@
  *-------------------------------------------------------------------------------
  *  Revision History
  *  $Log: pes.c,v $
+ *  Revision 1.3  2016/10/01 13:32:55  richard
+ *  Make header error non fatal
+ *
  *  Revision 1.2  2016/09/01 15:37:42  richard
  *  Extensively updated to V0.2 for EN 300 743 compliant subtitles
  *  added   -b  and  -n flags
@@ -657,8 +660,8 @@ int cPES::Process(const uchar *data, int len)
                     printf("genindex: OOPs large subs timing offset! %jdms\n",ptsdiff);
                   }
                   if (headerSize +2 > (int)sizeof (headerstore)) {
-                    printf("PES: OOPs huge header! %d at %jd\n",headerSize,ptsnow[type]);
-                    exit(1);
+                    printf("PES: OOPs huge header! %d at %jd - packet dropped\n",headerSize,ptsnow[type]);
+                    break;
                   }
                   if (overrun) {    // continuation packets don't have a PTS AFAIK
                     DEBUG("PES: Suspect  %d bytes left at start of new packet!\n",overrun);

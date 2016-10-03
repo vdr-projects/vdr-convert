@@ -74,6 +74,10 @@
 #------------------------------------------------------------------------------
 #
 # $Log: vdr-convert,v $
+# Revision 1.5  2016/10/03 10:24:58  richard
+# Separated subs size function, add new test/compare after conversion
+# Add -j (just subs) switch for easier subs extraction for use in manual reassembly
+#
 # Revision 1.4  2016/09/26 10:19:06  richard
 # Improvement to subtitle failure logic (prefer ffmpeg status to size)
 #
@@ -180,6 +184,19 @@ function progduration {
     minsubsize=$(($duration * 2))
     minsubsize=$(($minsubsize / 17))   # 425k / hr absolute min (empirical)
   fi
+}
+
+#------------------------------------------------------------------------------
+# Broken subs streams WILL cause an early exit, so test them quickly : ability to copy & their size
+# $1 is input, $2 output file (when required for VDR1.x conversions)
+
+function subslength {
+  echo;echo "Testing subtitles for problems..."
+  substest=$(eval "$ffmpeg -copyts -i "\"$1"\" -c:s copy -vn -an -dn -f mpegts "\"$2"\" 2>&1")
+  [ $? -ne 0 ] && logit "Warning: ffmpeg failed subtitles stream test for $1" && return 1
+  len=$(echo "$substest" |grep "subtitle:"|cut -f4 -d":"|sed 's/[^0-9]*//g')
+  echo "Subs length $len kbytes OK"
+  return 0
 }
 
 #------------------------------------------------------------------------------
@@ -315,16 +332,8 @@ function map() {
       fi
 	fi
 	if [ $subs -eq 1 ] && [ $(echo $line |grep -i "dvb_subtitle") ]; then
-      # Broken subs streams WILL cause an early exit, so test them quickly : both ability to copy & their size
-      # (Skip any dvd_sub misidentified in old VDR recordings - e.g. if .vdr files passed unprocessed)
+      # Skip any dvd_sub misidentified in old VDR recordings - e.g. if .vdr files passed unprocessed
       # Can be multiple streams.
-      # Quit rather than continue otherwise subs could be lost.
-      echo;echo "Testing subtitles for problems..."
-      substest=$(eval "$ffmpeg -i "\"$1"\" -vn -an -dn -c:s copy -f mpegts /dev/null 2>&1")
-      [ $? -ne 0 ] && logit "ffmpeg failed subtitles stream test" && quit 1
-      subslen=$(echo "$substest" |grep "subtitle:"|cut -f4 -d":"|sed 's/[^0-9]*//g')
-      # Now we rely just on the test above. If ffmpeg says OK, it's OK
-      echo "Subs length $subslen kbytes OK"
       mapst="$mapst L:10000:$stream_id"
       H_SUBS="$H_SUBS -s $stream_id"
       SUBS[$stream_id]="-c:s:stream_op copy -metadata:s:s:stream_op language=$Slang"
@@ -339,7 +348,7 @@ function map() {
   # Order streams by initial alpha AND bitrate to fix stream order change by iso13818ts, or random broadcaster ordering
   # (many players play the first audio stream without user intervention). Produces "best" audio first, a bit like ffmpeg
   # Note that stream ordering (as reported by ffmpeg) has been observed varying between recording files in same recording!
-  [ $debug -eq 1 ] && echo;echo "Raw map string is: $mapst"
+  echo;echo "Raw map string is: $mapst"
   saveifs=$IFS
   IFS=' '
   totalmap=$(echo "$mapst"|tr " " "\n"|sort|cut -f1,3 -d":"|tr "\n" " "|tr "[:alpha:]" "$2")
@@ -361,7 +370,7 @@ function map() {
   map="$map $mapping"   # Additive complete map where needed
   echo;echo "stream mapping for $1 is:"
   echo "$map"
-  [ $debug -eq 1 ] && echo "$F_VIDEO $F_AUDIO $F_SUBS"
+  echo "$F_VIDEO $F_AUDIO $F_SUBS"
   return 0
 }
 
@@ -408,37 +417,41 @@ function convertvdr() {
       progduration $tmpts
       program_duration=$(($program_duration + $duration))   # combine all files. Must test as .ts, .vdr can fail
 
-      # Subs stream
       if [ $subs -eq 1 ]; then
         # Subs streams: MUST DO SEPARATELY as ffmpeg has big problems extracting ALL the subs and AD sparse packets
         # (cannot currently convert a small filtered subs-only file - doesn't work)
         # Many players also have this problem - esp if the video stream is present.
         # After exhaustive testing with many flags / options, atm there's NO other way to avoid this and reliably extract ALL dvbsubs
+
+        # Now we do the ffmpeg extract anyway, in case subs stream was really OK, and only fail if it *should* have been OK -
+        # i.e. genindex extracted more than minimum expected for duration. Subslength function now does both extract & size
+        # ffmpeg will fail it if stream is empty
         subsfile="$tempdir/subs.ts"
-        cmd="$ffmpeg -copyts -i "\"$tmpts"\" -c:s copy -vn -an -dn "\"$subsfile"\""
-        # Now we do the ffmpeg extract anyway, in case it was really OK, and only fail if it *should* have been OK
-        # (i.e. genindex extracted more than minimum expected). ffmpeg will fail it if stream is empty
-        sh -c $cmd
+        subslength $tmpts $subsfile
         if [ $? -ne 0 ]; then
           [ $debug -eq 0 ] && rm -f "$subsfile" || logit "could not remove $subsfile"
           if [ $subxsize -gt $minsubsize ]; then
-            logit "Fail: ffmpeg problem extracting subs stream(s) of $tmpts (check $LOGFILE)" && return 1
+            logit "Fail: ffmpeg problem extracting subs stream(s) of $tmpts" && return 1
           else
             logit "Warning: only $subxsize kb subtitles in $1 (VDR 1.x), expected min. $minsubsize kb: none/broken/only in ads: none converted"
           fi
         else
+          subslen=$len
           # add and map the extra subs file, so the main conversion catches it, check ffmpeg didn't drop more than 10kb subs (~1 sub)
-          map $subsfile 1
-          [ $subxsize -gt $(($subslen+10)) ] && logit "Fail: ffmpeg did not process all subs for $1 (VDR 1.x, $subslen kb processed, $subxsize kb extracted), deleting $tempdir !" && rm -rf "$tempdir" && return 1
+          [ $subxsize -gt $(($subslen+10)) ] && logit "Fail: ffmpeg did not pre-process all subs for $1 (VDR 1.x, $subslen kb processed, $subxsize kb extracted), deleting $tempdir !" && rm -rf "$tempdir" && return 1
           # ffmpeg used to report EXACTLY the same size, newer versions perhaps not
           [ $subxsize -ne $subslen ] && logit "Warning: ffmpeg reported different subs size to genindex (VDR 1.x) for $1 ($subslen kb vs. $subxsize kb)"
+          map $subsfile 1
           map="-i \"$subsfile\" $F_SUBS $map"
           echo;echo "Final subs map is $map"
           echo
         fi
       else
-        logit "Skipping subtitles in $1 per command"
+        logit "Skipping subtitles in $main per command"
       fi
+
+      # subs only - for manual recovery
+      [ $j -eq 1 ] && rm -f "$tmpts" && logit "Subtitles ready in $subsfile" && return 2
 
       # Main AV stream(s). Lose any subs here, as they won't (all) copy in ONE go, nice as that would be!
       # Also required to ensure streams sync properly when combined. 
@@ -454,16 +467,35 @@ function convertvdr() {
         return 1
       fi
       [ $debug -eq 0 ] && rm -f "$tmpts"
+      map $main 0       # Additive map (add in subs file/map as reqd). Loses F_SUBS !
     fi
     #end VDR1.x
   else
     # VDR2
     progduration $main
     program_duration=$(($program_duration + $duration))   # combine all files.
+    map $main 0
+    if [ $subs -eq 1 ]; then
+      if [ ! "$F_SUBS" ]; then
+        logit "Warning no subtitles stream found in $main: none/broken/only in ads: none converted"
+      else
+        subslength $main "/dev/null"
+        # Quit rather than continue otherwise subs could be lost, and as subs mapped, ffmpeg likely to fail
+        [ $? -ne 0 ] && return 1
+        subslen=$len
+        # Now we just rely on the substest. If ffmpeg says OK, it's OK, but still warn and just in case don't delete originals
+        if [ $subslen -lt $minsubsize ]; then
+          logit "Warning subtitles stream in $main is smaller than minimum expected ($subslen vs. $minsubsize kb)"
+          # If VDR2, perhaps not possible to transcode with subs
+          [ $delete -eq 1 ] && delete=0 && logit "Possible fail: not deleting originals for $main due to suspect subtitle stream size - please check"
+        fi
+      fi
+    else
+      logit "Skipping subtitles in $main per command"
+    fi
   fi
 
-  # The main conversion
-  map $main 0                   # Additive map for VDR1.x conversions (add in subs file/map as reqd)
+  # The main conversion. Report mapping results to info file
   reportedvideo=$F_VIDEO
   reportedaudio=$F_AUDIO
 
@@ -475,9 +507,10 @@ function convertvdr() {
       # So even if keeping (e.g. automatic VDR transcode), without video use plain AAC so can transcode again if req'd
       [ "$F_VIDEO" ] && [ $mpeg -eq 0 ] && latm="-mpegts_flags latm"
 	fi
-    #copyts is already in the map if/when req'd
+    #copyts and content of F_SUBS is already in the map if/when req'd for VDR1.x files
     cmd="$ffmpeg $debug_time -i "\"$main"\" $map $F_VIDEO $F_AUDIO $F_SUBS -f mpegts $latm "\"$2"\" 2>> $LOGFILE"
 	echo
+    # Actual conversion (long)
 	logit "Executing $cmd"
 	sh -c $cmd
 	if [ $? -ne 0 ]; then
@@ -485,6 +518,12 @@ function convertvdr() {
       rm -f "$2" || logit "could not remove "\"$2"\""
 	  return 1
 	fi
+    # Now re-test/compare after conversion in case ffmpeg lost some (still keep for examination in case really OK)...
+    if [ "$F_SUBS" ] || [ $copyts ]; then
+      subslength $2 "/dev/null"
+      [ $? -ne 0 ] && return 1
+      [ $(($len+10)) -lt $subslen ] && logit "Fail: ffmpeg did not process all subs for $input (input $subslen kb, output $len kb)" && return 1
+    fi
     # clean up
   else
 	logit "Fail: Nothing to convert for $input !"
@@ -509,7 +548,7 @@ function upload() {
 }
 
 function usage() {
-  echo "usage: $0 --input-path | -i \"<recording.rec>\" [--keep |-k] [--combine |-c] [--delete |-d] [--extras |-e \"<ffmpeg opts>\"] [--nosubs] |-n] [--life |-l <days>] [--mpeg |-m] |--quality |-q <CRF>] [--yadif |-y <0|1>] [--tsonly |-t] [--crop-top <lines>] [--ftp] [--ftp-path <target path>] [--redo] |-r ] [--server |-s] [--user |-u] [--pass |-p]"
+  echo "usage: $0 --input-path | -i \"<recording.rec>\" [--keep |-k] [--just-subs |-j] [--combine |-c] [--delete |-d] [--extras |-e \"<ffmpeg opts>\"] [--nosubs] |-n] [--life |-l <days>] [--mpeg |-m] |--quality |-q <CRF>] [--yadif |-y <0|1>] [--tsonly |-t] [--crop-top <lines>] [--ftp] [--ftp-path <target path>] [--redo] |-r ] [--server |-s] [--user |-u] [--pass |-p]"
 }
 
 function escape() {
@@ -557,6 +596,7 @@ monobitrate=50
 quality=23
 top=0       # optional cropping
 mpeg=0
+j=0
 preset="faster"
 
 while [ "$1" != "" ]; do
@@ -576,6 +616,9 @@ while [ "$1" != "" ]; do
                                 ;;
         -e | --extras )         shift
                                 extras="$1"
+                                ;;
+        -j | --just-subs )      j=1
+                                combine=1
                                 ;;
         -k | --keep )           keep=1
 								quality=20.5
@@ -809,7 +852,6 @@ else
   OUTFILE="$(pwd)/$BASENAME.$ext"    # default to current directory
   AUDIO_ONLY="$(pwd)/$BASENAME.m4a"
 fi
-
 if [[ $redo -eq 0 && $MERGEFILES ]]; then
   #ts's can be concatenated directly. Again probe deeply else can fail, esp on AD/subs. 
   # NOTE concat file better than concat stream: lipsync issues
@@ -821,9 +863,9 @@ if [[ $redo -eq 0 && $MERGEFILES ]]; then
   if [ $? -eq 0 ]; then
     size=$(stat -c %s "$OUTFILE" )
     if [ $keep -eq 1 ]; then
-      # check for duration match within 20s (empirical magic number)
+      # check for duration match within 30s (empirical magic number)
       progduration $OUTFILE
-      if [ $(($duration + 20)) -lt $program_duration ]; then
+      if [ $(($duration + 30)) -lt $program_duration ]; then
         logit "Possible fail: $OUTFILE, size $(($size/$meg))M, is only $duration sec long, original $(($totalsize/$meg))M, with length detected as $program_duration sec"
         cleanup
         quit 1
@@ -921,4 +963,4 @@ fi
 # remove lockfile
 quit 0
 
-# --------- $Id: vdr-convert,v 1.4 2016/09/26 10:19:06 richard Exp $ ---------- END
+# --------- $Id: vdr-convert,v 1.5 2016/10/03 10:24:58 richard Exp $ ---------- END

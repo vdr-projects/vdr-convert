@@ -22,6 +22,9 @@
  *-------------------------------------------------------------------------------
  *  Revision History
  *  $Log: version.h,v $
+ *  Revision 1.3  2016/10/01 13:36:07  richard
+ *  Make header error non fatal
+ *
  *  Revision 1.2  2016/09/01 15:37:42  richard
  *  Extensively updated to V0.2 for EN 300 743 compliant subtitles
  *  added   -b  and  -n flags
@@ -33,8 +36,8 @@
 #define ___VERSION_H
 
 #define PRG_NAME    "genindex"
-#define PRG_VERSION "0.2.0"
+#define PRG_VERSION "0.2.1"
 
 #endif //___VERSION_H
 
-// --------- $Id: version.h,v 1.2 2016/09/01 15:37:42 richard Exp $ ---------- END
+// --------- $Id: version.h,v 1.3 2016/10/01 13:36:07 richard Exp $ ---------- END
