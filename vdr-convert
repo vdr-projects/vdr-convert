@@ -74,6 +74,9 @@
 #------------------------------------------------------------------------------
 #
 # $Log: vdr-convert,v $
+# Revision 1.6  2016/12/06 12:20:20  richard
+# Allow for fractional -q values (e.g. 22.5), use 'veryfast' x264 preset for 1-time transcodes (performance/size sweetspot)
+#
 # Revision 1.5  2016/10/03 10:24:58  richard
 # Separated subs size function, add new test/compare after conversion
 # Add -j (just subs) switch for easier subs extraction for use in manual reassembly
@@ -597,7 +600,7 @@ quality=23
 top=0       # optional cropping
 mpeg=0
 j=0
-preset="faster"
+preset="veryfast"
 
 while [ "$1" != "" ]; do
     case $1 in
@@ -627,17 +630,17 @@ while [ "$1" != "" ]; do
                                 preset="medium"     # better actual quality at same CRF. Can go slower but unconvinced of benefit
                                 ;;
         -l | --life )           shift
-                                life=$(echo $1|sed -e 's/[^0-9]//g')
+                                life=$(echo "$1"|sed -e 's/[^0-9]//g')
                                 ;;
         -m | --mpeg2 )          mpeg=1
                                 ;;
         -n | --nosubs )         subs=0
                                 ;;
         -q | --quality )        shift
-                                quality=$(echo $1|sed -e 's/[^0-9]//g')
+                                quality=$(echo "$1"|sed -e 's/[^0-9.]//g')
                                 ;;
         -y | --dif )            shift
-                                dif=$(echo $1|sed -e 's/[^0-9]//g')
+                                dif=$(echo "$1"|sed -e 's/[^0-9]//g')
                                 ;;
 		-t | --tsonly )			ts=1
 								;;
@@ -963,4 +966,4 @@ fi
 # remove lockfile
 quit 0
 
-# --------- $Id: vdr-convert,v 1.5 2016/10/03 10:24:58 richard Exp $ ---------- END
+# --------- $Id: vdr-convert,v 1.6 2016/12/06 12:20:20 richard Exp $ ---------- END
