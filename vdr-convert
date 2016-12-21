@@ -74,6 +74,9 @@
 #------------------------------------------------------------------------------
 #
 # $Log: vdr-convert,v $
+# Revision 1.71  2016/12/21 18:17:05  richard
+# missing return value from logit
+#
 # Revision 1.7  2016/12/21 14:14:43  richard
 # Added logging criticality to syslog messages (info, warn, err)
 # Optional email of events at criticality "err" (see $email variable)
@@ -184,6 +187,7 @@ function logit() {
   [ -z "$crit" ] && crit="warn"    # default
   logger -s -p "$log_facility.$crit" -t vdr-convert "$1"
   [[ $crit = "err" ]] && [ "$email" ] && echo $1 | mail -s "vdr-convert error" $email
+  return 0
 }
 
 #------------------------------------------------------------------------------
@@ -987,4 +991,4 @@ fi
 # remove lockfile
 quit 0
 
-# --------- $Id: vdr-convert,v 1.7 2016/12/21 14:14:43 richard Exp $ ---------- END
+# --------- $Id: vdr-convert,v 1.71 2016/12/21 18:17:05 richard Exp $ ---------- END
