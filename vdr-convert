@@ -74,6 +74,13 @@
 #------------------------------------------------------------------------------
 #
 # $Log: vdr-convert,v $
+# Revision 1.7  2016/12/21 14:14:43  richard
+# Added logging criticality to syslog messages (info, warn, err)
+# Optional email of events at criticality "err" (see $email variable)
+# Truncate subtitle if total filename will exceed filesystem max length (see $filesystem variable)
+# Add option to manually recover broken files ( -j ) for VDR2 as well as VDR1
+# Remove any " from titles and subtitles which causes errors (single ' OK)
+#
 # Revision 1.6  2016/12/06 12:20:20  richard
 # Allow for fractional -q values (e.g. 22.5), use 'veryfast' x264 preset for 1-time transcodes (performance/size sweetspot)
 #
@@ -109,7 +116,6 @@
 
 # ********************************* TODO >> **********************************
 #
-# Logging criticality - all same atm
 # Paths for executables, used as variables, test for their existance
 # mplayer plays at 2x speed (confuses fps, -fps 25 doesn't help)
 # Automatic test/retry FTP upload size to fix upload failures
@@ -124,7 +130,7 @@
 
 #This is for detailed ffmpeg output
 LOGFILE="/var/log/vdr-convert.log"
-log_facility="local2.warn"
+log_facility="local2"
 #ffmpeg="timeout -k 5h 4h nice -n 19 /opt/data/develop/FFmpeg/ffmpeg -y -hide_banner -nostats -probesize 250M -analyzeduration 600M -copytb 1"
 # Timeout req'd for troublesome conversions where ffmpeg can (rarely) get stuck. However causes issues when run interactively.
 ffmpeg="nice -n 19 /opt/data/develop/FFmpeg/ffmpeg -y -hide_banner -nostats -probesize 250M -analyzeduration 600M -copytb 1"
@@ -149,6 +155,9 @@ Alangsurround="eng"
 ADlang="eng"
 Slang="eng"
 ext="ts"    # target file extension
+filesystem=190   # limit filename length to 256 allowing ~60 chars for EP, DOW etc
+# Check behaviour on your filesystem with unicode/UTF characters, may need adjustment
+email='root'   # your email for important error messages (optional)
 
 # ********************* Should not need to edit below here ********************
 
@@ -164,13 +173,17 @@ IFS=$'\n'
 #------------------------------------------------------------------------------
 
 function quit() {
-  rm -f "$LOCKFILE" || { logit "failed to delete $LOCKFILE"; exit 1; }
+  rm -f "$LOCKFILE" || { logit "failed to delete $LOCKFILE" "err"; exit 1; }
   exit $1
 }
 
 #------------------------------------------------------------------------------
+# $1 the is message, $2 is criticality. Now optionally email errors
 function logit() {
-  logger -s -p $log_facility -t vdr-convert "$1"
+  crit=$2
+  [ -z "$crit" ] && crit="warn"    # default
+  logger -s -p "$log_facility.$crit" -t vdr-convert "$1"
+  [[ $crit = "err" ]] && [ "$email" ] && echo $1 | mail -s "vdr-convert error" $email
 }
 
 #------------------------------------------------------------------------------
@@ -191,7 +204,7 @@ function progduration {
 
 #------------------------------------------------------------------------------
 # Broken subs streams WILL cause an early exit, so test them quickly : ability to copy & their size
-# $1 is input, $2 output file (when required for VDR1.x conversions)
+# $1 is input, $2 output file (when required for VDR1.x conversions, or -j option)
 
 function subslength {
   echo;echo "Testing subtitles for problems..."
@@ -316,7 +329,7 @@ function map() {
         (( bitrate = bitrate / 12 ))
         if [ $outputbitrate -gt $bitrate ]; then
           outputbitrate=$bitrate
-          [ $outputbitrate -lt 100 ] && logit "Fail: Audio bitrate too low ($outputbitrate), exiting" && quit 1
+          [ $outputbitrate -lt 100 ] && logit "Fail: Audio bitrate too low ($outputbitrate), exiting" "err" && quit 1
         fi
         H_AUDIO_MAP="$H_AUDIO_MAP $stream_id,"
         H_AUDIO_CODEC="$H_AUDIO_CODEC mp3,"
@@ -396,26 +409,26 @@ function convertvdr() {
     # but ffmpeg occasionally fails detection of *any* streams when given an unprocessed .vdr file
     rm -f "$tempdir"/*.vdr  # in case we're re-doing: genindex otherwise fails
     mkdir -p -- "$tempdir"
-    [ $? -ne 0 ] && logit "Failed - cannot create working directory $tempdir" && return 1
+    [ $? -ne 0 ] && logit "Failed - cannot create working directory $tempdir" "err" && return 1
     subxsize=$(genindex -n -b -i "$1" -d "$tempdir" |grep -i "^PES: Stats" |grep -i "subtitle data" |cut -f2 -d":"|sed 's/[^0-9]*//g')
     if [ $? -ne 0 ]; then
-      logit "Fail: genindex problem converting $1"
-      [ $debug -eq 0 ] && rm -rf "$tempdir"  || logit "could not remove $tempdir"
+      logit "Fail: genindex problem converting $1" "err"
+      [ $debug -eq 0 ] && rm -rf "$tempdir"  || logit "could not remove $tempdir" "err"
       return 1 
     else
       echo
-      logit "$1 genindex extracted $subxsize kb subtitle data"
+      logit "$1 genindex extracted $subxsize kb subtitle data" "info"
       # convert to ffmpeg-compatible .ts (so ffmpeg can see the streams in an mpegts container - no dvb decoder for PS/PES)
-      # NOTE that iso13818ts oftens changes the order of streams which may be relevant for audio playback - see map fn.
+      # NOTE that iso13818ts often changes the order of streams which may be relevant for audio playback - see map fn.
       # Fix this later when reassembling streams
       tmpts="$tempdir/001.ts"
       nice -n 19 iso13818ts -P "$tempdir/001.vdr" 1 > "$tmpts"
       if [ $? -ne 0 ]; then
-        logit "Fail: Problem converting $tempdir/001.vdr to mpegts, deleting $tmpts !"
-        [ $debug -eq 0 ] && rm -f $tmpts || logit "could not remove $tmpts" 
+        logit "Fail: Problem converting $tempdir/001.vdr to mpegts, deleting $tmpts !" "err"
+        [ $debug -eq 0 ] && rm -f $tmpts || logit "could not remove $tmpts" "err"
         return 1
       fi
-      [ $debug -eq 0 ] && rm -f "$tempdir"/*.vdr || logit "could not remove temp files"    # No longer reqd
+      [ $debug -eq 0 ] && rm -f "$tempdir"/*.vdr || logit "could not remove temp files" "err"   # No longer reqd
 
       progduration $tmpts
       program_duration=$(($program_duration + $duration))   # combine all files. Must test as .ts, .vdr can fail
@@ -432,16 +445,16 @@ function convertvdr() {
         subsfile="$tempdir/subs.ts"
         subslength $tmpts $subsfile
         if [ $? -ne 0 ]; then
-          [ $debug -eq 0 ] && rm -f "$subsfile" || logit "could not remove $subsfile"
+          [ $debug -eq 0 ] && rm -f "$subsfile" || logit "could not remove $subsfile" "err"
           if [ $subxsize -gt $minsubsize ]; then
-            logit "Fail: ffmpeg problem extracting subs stream(s) of $tmpts" && return 1
+            logit "Fail: ffmpeg problem extracting subs stream(s) of $tmpts" "err" && return 1
           else
             logit "Warning: only $subxsize kb subtitles in $1 (VDR 1.x), expected min. $minsubsize kb: none/broken/only in ads: none converted"
           fi
         else
           subslen=$len
           # add and map the extra subs file, so the main conversion catches it, check ffmpeg didn't drop more than 10kb subs (~1 sub)
-          [ $subxsize -gt $(($subslen+10)) ] && logit "Fail: ffmpeg did not pre-process all subs for $1 (VDR 1.x, $subslen kb processed, $subxsize kb extracted), deleting $tempdir !" && rm -rf "$tempdir" && return 1
+          [ $subxsize -gt $(($subslen+10)) ] && logit "Fail: ffmpeg did not pre-process all subs for $1 (VDR 1.x, $subslen kb processed, $subxsize kb extracted), deleting $tempdir !" "err" && rm -rf "$tempdir" && return 1
           # ffmpeg used to report EXACTLY the same size, newer versions perhaps not
           [ $subxsize -ne $subslen ] && logit "Warning: ffmpeg reported different subs size to genindex (VDR 1.x) for $1 ($subslen kb vs. $subxsize kb)"
           map $subsfile 1
@@ -450,11 +463,11 @@ function convertvdr() {
           echo
         fi
       else
-        logit "Skipping subtitles in $main per command"
+        logit "Skipping subtitles in $main per command" "info"
       fi
 
       # subs only - for manual recovery
-      [ $j -eq 1 ] && rm -f "$tmpts" && logit "Subtitles ready in $subsfile" && return 2
+      [ $j -eq 1 ] && rm -f "$tmpts" && logit "Subtitles ready in $subsfile" "info" && return 2
 
       # Main AV stream(s). Lose any subs here, as they won't (all) copy in ONE go, nice as that would be!
       # Also required to ensure streams sync properly when combined. 
@@ -465,8 +478,8 @@ function convertvdr() {
       cmd="$ffmpeg $copyts -i "\"$tmpts"\" -c:v copy -c:a copy -sn -dn -map 0 "\"$main"\""
       sh -c $cmd
       if [ $? -ne 0 ]; then
-        logit "Fail: ffmpeg problem extracting main streams of $main (VDR 1.x), deleting (check $LOGFILE)"
-        [ $debug -eq 0 ] && rm -f $main || logit "could not remove $main"
+        logit "Fail: ffmpeg problem extracting main streams of $main (VDR 1.x), deleting (check $LOGFILE)" "err"
+        [ $debug -eq 0 ] && rm -f $main || logit "could not remove $main" "err"
         return 1
       fi
       [ $debug -eq 0 ] && rm -f "$tmpts"
@@ -482,20 +495,25 @@ function convertvdr() {
       if [ ! "$F_SUBS" ]; then
         logit "Warning no subtitles stream found in $main: none/broken/only in ads: none converted"
       else
-        subslength $main "/dev/null"
+        subsfile="/dev/null"
+        # subs only - for manual recovery
+        [ $j -eq 1 ] && subsfile="subs.ts"
+        subslength $main $subsfile
         # Quit rather than continue otherwise subs could be lost, and as subs mapped, ffmpeg likely to fail
-        [ $? -ne 0 ] && return 1
+        [ $? -ne 0 ] && logit "Fail: ffmpeg problem extracting subs stream(s) of $main" "err" && return 1
         subslen=$len
         # Now we just rely on the substest. If ffmpeg says OK, it's OK, but still warn and just in case don't delete originals
         if [ $subslen -lt $minsubsize ]; then
           logit "Warning subtitles stream in $main is smaller than minimum expected ($subslen vs. $minsubsize kb)"
           # If VDR2, perhaps not possible to transcode with subs
-          [ $delete -eq 1 ] && delete=0 && logit "Possible fail: not deleting originals for $main due to suspect subtitle stream size - please check"
+          [ $delete -eq 1 ] && delete=0 && logit "Possible fail: not deleting originals for $main due to suspect subtitle stream size - please check" "err"
         fi
       fi
     else
-      logit "Skipping subtitles in $main per command"
+      logit "Skipping subtitles in $main per command" "info"
     fi
+    # subs only - for manual recovery
+    [ $j -eq 1 ] && logit "Subtitles ready in $subsfile" "info" && return 2
   fi
 
   # The main conversion. Report mapping results to info file
@@ -505,35 +523,35 @@ function convertvdr() {
   if [ "$F_AUDIO" ]; then     # Only if we see something meaningful (may be only audio if radio recording)
 	if [ $keep -eq 1 ]; then
       # might want to compress more for temp use, but never if keeping
-      [ $h264 -eq 1 -o $aac -eq 1 ] && logit "Skipping $main: already H264 or AAC" && return 2
+      [ $h264 -eq 1 -o $aac -eq 1 ] && logit "Skipping $main: already H264 or AAC" "info" && return 2
       # LATM multiplexing matches broadcast MPEG4 HD audio streams, but can't currently be demuxed to plain AAC by FFMPEG
-      # So even if keeping (e.g. automatic VDR transcode), without video use plain AAC so can transcode again if req'd
+      # So even if keeping (e.g. automatic VDR transcode), if no video use plain AAC so can transcode again if req'd
       [ "$F_VIDEO" ] && [ $mpeg -eq 0 ] && latm="-mpegts_flags latm"
 	fi
     #copyts and content of F_SUBS is already in the map if/when req'd for VDR1.x files
     cmd="$ffmpeg $debug_time -i "\"$main"\" $map $F_VIDEO $F_AUDIO $F_SUBS -f mpegts $latm "\"$2"\" 2>> $LOGFILE"
 	echo
     # Actual conversion (long)
-	logit "Executing $cmd"
+	logit "Executing $cmd" "info"
 	sh -c $cmd
 	if [ $? -ne 0 ]; then
-	  logit "Fail: ffmpeg problem converting $input, deleting "\"$2"\" !"
-      rm -f "$2" || logit "could not remove "\"$2"\""
+	  logit "Fail: ffmpeg problem converting $input, deleting "\"$2"\" !" "err"
+      rm -f "$2" || logit "could not remove "\"$2"\"" "err"
 	  return 1
 	fi
     # Now re-test/compare after conversion in case ffmpeg lost some (still keep for examination in case really OK)...
     if [ "$F_SUBS" ] || [ $copyts ]; then
       subslength $2 "/dev/null"
       [ $? -ne 0 ] && return 1
-      [ $(($len+10)) -lt $subslen ] && logit "Fail: ffmpeg did not process all subs for $input (input $subslen kb, output $len kb)" && return 1
+      [ $(($len+10)) -lt $subslen ] && logit "Fail: ffmpeg did not process all subs for $input (input $subslen kb, output $len kb)" "err" && return 1
     fi
     # clean up
   else
-	logit "Fail: Nothing to convert for $input !"
+	logit "Fail: Nothing to convert for $input !" "err"
 	return 1
   fi
   if [ $VDRtype ]; then
-    [ $debug -eq 0 ] && rm -rf "$tempdir" || logit "could not remove $tempdir"
+    [ $debug -eq 0 ] && rm -rf "$tempdir" || logit "could not remove $tempdir" "err"
   fi
   map=""      # clear in case we process more files
   return 0
@@ -561,7 +579,7 @@ function escape() {
 function cleanup() {
   # logit "Deleting intermediate file(s)"
   cmd="rm -f $TMPFILES"
-  [ $debug -eq 0 ] && sh -c $cmd || logit "could not remove file(s)"
+  [ $debug -eq 0 ] && sh -c $cmd || logit "could not remove file(s)" "err"
 }
 
 #------------------------------------------------------------------------------
@@ -688,7 +706,7 @@ fi
 # create lockfile
 echo $$ >"$LOCKFILE" || { logit "Error: cannot create lockfile for $0"; exit 1; }
 
-logit "Processing recording "\"$input"\", keep=$keep, delete=$delete, combine=$combine, subs=$subs, extras=$extras"
+logit "Processing recording "\"$input"\", keep=$keep, delete=$delete, combine=$combine, subs=$subs, extras=$extras" "info"
 
 # VDR filetypes 1.x (PES) or 2.x (TS), based on filenames in recording directory
 
@@ -698,7 +716,7 @@ vdrfiles=0; tsfiles=0
 vdrfiles=($(ls -1 "$input" | grep ".vdr$" |grep -o '[0-9]\{3\}'| wc -l))
 tsfiles=($(ls -1 "$input" | grep ".ts$" |grep -o '[0-9]\{5\}'| wc -l))
 # must have 1 data file min, ideally an info file. We don't care about index file here
-[ $vdrfiles -lt 1 -a $tsfiles -lt 1 ] && logit "vdr=$vdrfiles,ts=$tsfiles : too few recording / info files!" && quit 1
+[ $vdrfiles -lt 1 -a $tsfiles -lt 1 ] && logit "vdr=$vdrfiles,ts=$tsfiles : too few recording / info files!" "err" && quit 1
 
 # Assume there are multiple files, as merging is v. quick
 if [ $vdrfiles -gt 0 ]; then
@@ -722,6 +740,9 @@ do
   TITLE=$(echo "$line" |grep "^T" |sed -e "s/^T //")
   # optional fields - add them for improved ID
   ID[0]=$(echo "$line" |grep "^S" |sed -e "s/^S //")  #subtitle
+  # Support filesystems with limited max filename size by truncating just subtitle
+  l=$((${#TITLE} + ${#ID[0]}))
+  [ $l -ge $filesystem ] && ID[0]=$(echo $ID[0] |cut -c1-$filesystem)...
   EP=$(echo "$line" |grep "^D" |grep -oP '(?<=Episode:).*' |cut -f1 -d"|")
   # Meta info event date, time and DOW, 3rd field - useful in file listings for offline use
   ID[2]=$(echo "$line" |grep "^E" |cut -f3 -d" " |awk '{print strftime("%F-%a_%H-%M",$1)}')
@@ -768,7 +789,7 @@ if [ $VDRtype ]; then
 fi
 
 # Short lifetime files skipped if we are "keeping" them - save time & energy
-[ $lifetime -lt $life ] && [ $keep -eq 1 ] && logit "Skipping $input, recording lifetime is $lifetime" && quit 0
+[ $lifetime -lt $life ] && [ $keep -eq 1 ] && logit "Skipping $input, recording lifetime is $lifetime" "info" && quit 0
 
 # Option to combine input files: Useful if there are lots of very small fragments due to interruptions.
 # Usually we convert separately, in case a broken file fails. Combining might be less reliable,
@@ -790,8 +811,8 @@ do
     totalsize=$(($totalsize + $size))
     fileno=$(($fileno + 1))
     echo
-    logit "Processing $f file $fileno, size $(($size/$meg))M..."
-    TMPFILE=$(echo "$TITLE-file-$fileno" | tr -s "\/:?*<>| " '-')
+    logit "Processing $f file $fileno, size $(($size/$meg))M..." "info"
+    TMPFILE=$(echo "$TITLE-file-$fileno" | tr -s "\/:?*<>\"| " '-')
     OUTFILE="$TMPFILE.$ext"
     if [ $keep -eq 1 ]; then
        OUTFILE="$input/$OUTFILE"
@@ -813,13 +834,13 @@ do
       convertvdr "$f" "$OUTFILE"
       return=$?
       if [ $debug -eq 0 ] && [ $combine -eq 1 ] && [ -e "$input/recording.orig" ]; then
-        rm -f "$input/recording.orig" || logit "could not remove $input/recording.orig"
+        rm -f "$input/recording.orig" || logit "could not remove $input/recording.orig" "err"
       fi
       [ $return -eq 1 ] && quit 1
       [ $return -eq 2 ] && quit 0
     fi
   else
-    logit "Skipping $f - too small ($(($size/$meg))M). Try combining input files with -c option"
+    logit "Skipping $f - too small ($(($size/$meg))M). Try combining input files with -c option" "err"
     # !!!continue but no longer delete (so don't lose anything if it goes wrong)
     [ $keep -eq 1 ] && [ $delete -eq 1 ] && delete=0 && logit "No longer deleting files for $input"
   fi
@@ -845,8 +866,8 @@ else
 fi
 
 # Now merge them, avoid faffing about with separate files
-NAME="$TITLE-$DEF"
-BASENAME=$(echo "$TITLE" | tr -s "\/:?*<>| " '-')
+NAME=$(echo "$TITLE-$DEF" | tr -s "\"" '-')
+BASENAME=$(echo "$TITLE" | tr -s "\/:?*<>\"| " '-')
 if [ $keep -eq 1 ]; then
   OUTFILE="$input/$BASENAME.$ext"
 else
@@ -861,7 +882,7 @@ if [[ $redo -eq 0 && $MERGEFILES ]]; then
   # -copyts??? Without it ffmpeg reports duration correctly. Possibly not with copyts
   cmd="$ffmpeg -i concat:"\"$MERGEFILES"\" -metadata title="\"$NAME"\" -c copy -flags +global_header $map "\"$OUTFILE"\" 2>> $LOGFILE"
   echo;echo
-  logit "Executing $cmd"
+  logit "Executing $cmd" "info"
   sh -c $cmd
   if [ $? -eq 0 ]; then
     size=$(stat -c %s "$OUTFILE" )
@@ -869,13 +890,13 @@ if [[ $redo -eq 0 && $MERGEFILES ]]; then
       # check for duration match within 30s (empirical magic number)
       progduration $OUTFILE
       if [ $(($duration + 30)) -lt $program_duration ]; then
-        logit "Possible fail: $OUTFILE, size $(($size/$meg))M, is only $duration sec long, original $(($totalsize/$meg))M, with length detected as $program_duration sec"
+        logit "Possible fail: $OUTFILE, size $(($size/$meg))M, is only $duration sec long, original $(($totalsize/$meg))M, with length detected as $program_duration sec" "err"
         cleanup
         quit 1
       fi
       # check for silly compression ratio (converted less than 3/8 of original, or larger, heaven forbid!)
       if [ $(($totalsize * 3)) -gt $(($size * 8)) -o $size -gt $totalsize -a $mpeg -eq 0 ]; then
-        logit "Possible fail: Suspect size of $OUTFILE, (new $(($size/$meg))M vs. original $(($totalsize/$meg))M)"
+        logit "Possible fail: Suspect size of $OUTFILE, (new $(($size/$meg))M vs. original $(($totalsize/$meg))M)" "err"
         # keep converted outfile, actually it may be OK
         cleanup
         quit 1
@@ -890,7 +911,7 @@ if [[ $redo -eq 0 && $MERGEFILES ]]; then
         RECDIR="$ROOTDIR/$RECDIR.1-0.rec"
         mkdir -p -- "$RECDIR"
         if [ $? -ne 0 ]; then
-          logit "Failed - cannot create $RECDIR"
+          logit "Failed - cannot create $RECDIR" "err"
           cleanup
           quit 1
         fi
@@ -920,19 +941,19 @@ if [[ $redo -eq 0 && $MERGEFILES ]]; then
         echo "# Transcoded from $stats by $0 on $(date)" >> "$RECDIR/info"
         [ "$F_VIDEO" ] && echo "# Video parameters: $reportedvideo" >> "$RECDIR/info"
         [ "$F_AUDIO" ] && echo "# Audio parameters: $reportedaudio" >> "$RECDIR/info"
-        logit "Created/replaced .ts and indexed $NAME ($stats)"
+        logit "Created/replaced .ts and indexed $NAME ($stats)" "info"
         if [ $delete -eq 1 ]; then
           if [ $VDRtype ]; then
             # old VDR 1.x directory & content no use now
-            [ $debug -eq 0 ] && rm -rf "$input" || logit "could not remove original file(s)"
+            [ $debug -eq 0 ] && rm -rf "$input" || logit "could not remove original file(s)" "err"
           else
-            [ $debug -eq 0 ] && rm -f "$input"/*.orig || logit "could not remove original file(s)"
+            [ $debug -eq 0 ] && rm -f "$input"/*.orig || logit "could not remove original file(s)" "err"
           fi
-          logit "Original files for $NAME deleted"
+          logit "Original files for $NAME deleted" "info"
         fi
       else
         # Failed, so restore
-        logit "Conversion / indexing for $NAME failed"
+        logit "Conversion / indexing for $NAME failed" "err"
         if [ $VDRtype ]; then
           [ $debug -eq 0 ] && rm -rf "$RECDIR" || logit "could not delete temp conversion files"    # borked new directory
         else
@@ -952,11 +973,11 @@ if [[ $redo -eq 0 && $MERGEFILES ]]; then
         rm -f "$OUTFILE"
         OUTFILE="$AUDIO_ONLY"
       else
-        logit "Failed audio conversion to $AUDIO_ONLY"  # leave it to check later
+        logit "Failed audio conversion to $AUDIO_ONLY" "err" # leave it to check later
       fi
     fi
   else
-    logit "Fail: Converted files for $NAME did not merge correctly"
+    logit "Fail: Converted files for $NAME did not merge correctly" "err"
   fi
   cleanup
 fi
@@ -966,4 +987,4 @@ fi
 # remove lockfile
 quit 0
 
-# --------- $Id: vdr-convert,v 1.6 2016/12/06 12:20:20 richard Exp $ ---------- END
+# --------- $Id: vdr-convert,v 1.7 2016/12/21 14:14:43 richard Exp $ ---------- END

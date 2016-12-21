@@ -12,14 +12,13 @@ Software required
 =================
 
 All recordings: System running Linux/bash shell, FFMPEG 3.x, VDR 2.2x, core Linux utilities such as nice, timeout etc
+Optionally NCFTP if you want to upload files after conversion
 
 Additionally for VDR 1.x recordings:
 
 a) Modified GENINDEX (0.2) to convert subtitles to standard ETSI EN300743 format, and remove initial short segment sequences that currently prevent ffmpeg reliably detecting subtitle streams
 
 b) MPLEX13818 from http://www.scara.com/~schirmer/o/mplex13818 to reliably convert recordings into an mpegts container. ffmpeg doesn't handle dvbsubs in a program stream (.vdr native format), and sometimes fails to probe .vdr files correctly. In testing, this muxer produced much more reliable .ts files from VDR recordings than the myriad of versions of "ps2ts" etc. out there in the web.
-
-Optionally NCFTP if you want to upload files after conversion
 
 Configuring
 ===========
@@ -38,6 +37,10 @@ There are a few parameters at the top of vdr-convert to configure:
 "aac" set to libfdk_aac if you built and linked your ffmpeg with the non-free Fraunhofer AAC library 
 
 set default langauages if you are missing VDR "info" files.
+
+"filesystem", default is 190. This is the number of characters that the filesystem can handle, plus ~60 for date, time, epiosde number. Most filesystems limit the total to 255.
+
+email address if you want to be emailed about significant conversion failures
 
 batch.sh if you use it 
 - configure with the root of your VDR recording directory so that it can trigger VDR re-reads
@@ -95,3 +98,4 @@ Noad completes very much more quickly than vdr-convert because the ffmpeg librar
 noad or similar utilities can of course be run on the converted files too, and in test noad produces the same output (within a second). For this reason vdr-convert does not re-run noad on converted files, just copies any marks.vdr file over (if required for VDR1.x recordings).
 
 RF August 2016
+Updated Dec 2016
