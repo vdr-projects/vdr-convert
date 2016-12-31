@@ -22,6 +22,9 @@
  *-------------------------------------------------------------------------------
  *  Revision History
  *  $Log: version.h,v $
+ *  Revision 1.4  2016/12/31 16:11:24  richard
+ *  Support for 5.1 AC3 or DTS surround sound
+ *
  *  Revision 1.3  2016/10/01 13:36:07  richard
  *  Make header error non fatal
  *
@@ -36,8 +39,8 @@
 #define ___VERSION_H
 
 #define PRG_NAME    "genindex"
-#define PRG_VERSION "0.2.1"
+#define PRG_VERSION "0.2.2"
 
 #endif //___VERSION_H
 
-// --------- $Id: version.h,v 1.3 2016/10/01 13:36:07 richard Exp $ ---------- END
+// --------- $Id: version.h,v 1.4 2016/12/31 16:11:24 richard Exp $ ---------- END

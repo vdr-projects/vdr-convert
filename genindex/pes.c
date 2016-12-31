@@ -8,6 +8,9 @@
  *-------------------------------------------------------------------------------
  *  Revision History
  *  $Log: pes.c,v $
+ *  Revision 1.4  2016/12/31 16:11:24  richard
+ *  Support for 5.1 AC3 or DTS surround sound
+ *
  *  Revision 1.3  2016/10/01 13:32:55  richard
  *  Make header error non fatal
  *
@@ -463,7 +466,7 @@ int cPES::Process(const uchar *data, int len)
   static uchar headerstore[64];
   static int savedheadersize;
   static int overrun;
-  static bool started;
+  static bool subsstarted;
 
   while(used<len) {
     uchar *c=(uchar *)data+used;
@@ -532,7 +535,8 @@ int cPES::Process(const uchar *data, int len)
             continue;
           }
           // no sync found, move buffer one position ahead
-          have--; Skip(hbuff);
+          have--; 
+          Skip(hbuff);
           memmove(hbuff,hbuff+1,have);
           // if all bytes from previous data block used up, switch to FastSync
           if(!--old) {
@@ -620,156 +624,178 @@ int cPES::Process(const uchar *data, int len)
           case prAct1: n=Action1(type,c,n); break;
           case prAct2: n=Action2(type,c,n); break;
 //          case prAct3: n=Action3(type,c,n); break;
-          case prAct3:
-            /*  RF Because we have to assemble AN ENTIRE PES packet of possibly several existing 2k PES packets, 
-                and usually several subtitle segments, then as far as the long main loop is concerned, 
-                we drop all the subs packets regardless. 
-
-                VDR1.x packets can contain fragments of segments too
-
-                We have no idea how long we have to wait - need END_OF_DISPLAY_SET_SEGMENT to complete a PES
-                Then write out the assembled PES independently, hoping it's PTS doesn't 
-                upset something downstream. Should in any case be indpendent, but ffmpeg is touchy
-            */
-            n = -n; //drop all content for main loop
-            if (-n ) {
-              int PayloadOffset = headerSize;
-              bool ResetSubtitleAssembler = 0;
-              //VDR 1.x subs, skip special 4 byte "substream header" (VDR always strips all packets)
-              int SubstreamHeaderLength = (have == 0 ? 4 : 0);  // Full packet, not a continuation chunk from file
-              // c points to the payload only now             
-              if (SOP && SubstreamHeaderLength) {        // only if we have it
-                ResetSubtitleAssembler = c[3] == 0x00;
-                //PES hdr extension, RF original doesn't match vanilla 1.X recordings
-                if ((header[7] & 0x01) && (header[PayloadOffset - 3] & 0x81) == 0x01 &&  header[PayloadOffset - 2] == 0x81) {
-                  PayloadOffset--;
-                  SubstreamHeaderLength = 1;
-                  ResetSubtitleAssembler = (header[8] >= 5);
-                }
-                if (PesHasPts(header)) {
-                  int64_t oldpts = ptsnow[type];
-                  ptsnow[type] = PesGetPts(header);
-                  if (ptsnow[type] < oldpts) {
-                    // Non-monotonic subs send ffmpeg loopy
-                    printf("PES: OOPs Non-monotonic PTS at %jd (previous %jd!) - packet dropped\n",ptsnow[type],oldpts);
-                    break;
-                  }
-                  int64_t ptsdiff = (PtsDiff(ptsnow[0xc0],ptsnow[type]))/90;   //millisecs
-                  DEBUG("PES: subtitle packet pts %jd, latest main audio pts %jd, subs ahead %jdms\n",ptsnow[type],ptsnow[0xc0],ptsdiff);
-                  if (ptsnow[0xc0] && abs((int)ptsdiff) > 5000) {
-                    printf("genindex: OOPs large subs timing offset! %jdms\n",ptsdiff);
-                  }
-                  if (headerSize +2 > (int)sizeof (headerstore)) {
-                    printf("PES: OOPs huge header! %d at %jd - packet dropped\n",headerSize,ptsnow[type]);
-                    break;
-                  }
-                  if (overrun) {    // continuation packets don't have a PTS AFAIK
-                    DEBUG("PES: Suspect  %d bytes left at start of new packet!\n",overrun);
-                  }                    
-
-                  memcpy (headerstore,header,headerSize);
-                  headerstore[6] |= 0x01;                     // Set "Original" - per trouble-free .ts FWiW
-
-//                if (audiopts) PesSetPts(headerstore,audiopts);    // use existing if no audiopts
-                  
-//                Working on theory that ffmpeg wants a DTS for some reason, copy the PTS
-//                - it turns out that ffmpeg does this internally.
-//                  PesSetDtsbit(headerstore);
-//                  PesSetDts(headerstore,ptsnow[type]-18000);         // ~200ms earlier similar to other streams
-//                  headerstore[8]+=5;                        // 5 for DTS (we know it has PES ext:this is safe)
-                
-                  savedheadersize = headerSize+2+0;         // 5 for DTS
-                  memset (headerstore+headerSize+0,0x20,1); // subs data_identifier which is stripped below
-                  memset (headerstore+headerSize+1+0,0x00,1); // stream_id
-                }
+          case prAct3: 
+            // first deal with AC3 / DTS
+            n=Action1(type,c,n); // don't scan output
+            int PayloadOffset;
+            PayloadOffset = headerSize;
+            //PES hdr extension, from dvbsubtitle.c, Compatibility mode for old subtitles plugin (doesn't match vanilla 1.X recordings)
+            if ((header[7] & 0x01) && (header[PayloadOffset - 3] & 0x81) == 0x01 &&  header[PayloadOffset - 2] == 0x81) {
+                PayloadOffset--;
+            }
+            if (header[PayloadOffset] != 0x20) {   // assume AC3 or DTS
+              // VDR has the PES "DVD" substream header like 80 01 00 01 to identify the stream
+              // this confuses ffmpeg in a .ts, so strip it at SOP. sse http://stnsoft.com/DVD/ass-hdr.html
+              if (SOP) {
+                used+=4;
+                n-=4;
+                payloadSize-=4;         //dummy it up so we don't overstep
+                ModifyPaketSize(-4);    //actually truncate rewritten stream also
+                Skip(c,4);
               }
+              break;   // passthrough       
+            } else {
+              /*  Subtitles stream
+                  Because we have to assemble AN ENTIRE PES packet of possibly several existing 2k PES packets, 
+                  and usually several subtitle segments, then as far as the long main loop is concerned, 
+                  we drop all the subs packets. 
 
-              if (-n > SubstreamHeaderLength) {
-                const uchar *data = c + SubstreamHeaderLength; // skip substream header
-                int length = -n - SubstreamHeaderLength; // skip substream header
-                if (ResetSubtitleAssembler) {
-                  dvbSubtitleAssembler->Reset();
-                }
-                if (length > 3) {
-                  int Count, offset;
-                  int substotalthispacket=0; 
-                  if (data[0] == 0x20 && data[1] == 0x00 && data[2] == 0x0F) {
-                    offset = 2;
-                  } else {
-                    offset = 0;
+                  VDR1.x packets can contain fragments of segments too
+
+                  We have no idea how long we have to wait - need END_OF_DISPLAY_SET_SEGMENT to complete a PES
+                  Then write out the assembled PES independently, hoping it's PTS doesn't 
+                  upset something downstream. Should in any case be indpendent, but ffmpeg is touchy
+              */
+              n = -n; //drop all content for main loop
+              if (-n) {
+                PayloadOffset = headerSize;
+                bool ResetSubtitleAssembler = 0;
+                //VDR 1.x subs, skip special 4 byte "substream header" (VDR always strips all packets)
+                int SubstreamHeaderLength = (have == 0 ? 4 : 0);  // Full packet, not a continuation chunk from file
+                // c points to the payload only now             
+                if (SOP && SubstreamHeaderLength) {        // only if we have it
+                  ResetSubtitleAssembler = c[3] == 0x00;
+                  //PES hdr extension, from dvbsubtitle.c, Compatibility mode for old subtitles plugin (doesn't match vanilla 1.X recordings)
+                  if ((header[7] & 0x01) && (header[PayloadOffset - 3] & 0x81) == 0x01 &&  header[PayloadOffset - 2] == 0x81) {
+                    PayloadOffset--;
+                    SubstreamHeaderLength = 1;
+                    ResetSubtitleAssembler = (header[8] >= 5);    // i.e. there's a header extension
                   }
-                  int subslength = length - offset;
-                  DEBUG("PES: Put payload length %d into dvbSubtitleAssembler\n",subslength);
-                  dvbSubtitleAssembler->Put(data + offset, subslength);
-                  while (true) {
-                    unsigned char *b = dvbSubtitleAssembler->Get(Count);    // Count = seg size *req'd*, not actual available!
-                    if (b && b[0] == 0x0F && Count > 5) {
-                      // a complete segement
-                      uchar segmentType = b[1];
-                      if (segmentType == STUFFING_SEGMENT) {
-                        continue;
-                      }
-                      if (fifo_write(&fifo, b, Count) != Count) {
-                        DEBUG("PES: FIFO error\n");
-                        Return(used,len);                        
-                      }
-                      substotalthispacket+=Count-overrun;
-                      size+=Count;
-                      DEBUG("PES: subtitle complete segment length %d type %02X, subs in fifo %d (used %d this segment)\n",Count, segmentType, size, Count-overrun);
-                      if (Count-overrun < 0) {
-                        DEBUG("PES: Suspect overrun of %d bytes!\n",overrun);
-                      }
-                      overrun=0;    // must have used up all available data at start ofa new segment
-
-                      if (segmentType == END_OF_DISPLAY_SET_SEGMENT) {
-                        uchar outbuf[KILOBYTE(64)];
-                        if (fifo_read(&fifo, outbuf, size) != size) {
-                          DEBUG("PES: FIFO error\n");
-                          Return(used,len);
-                        }
-                        // skip the small 10...80 subs periodic "cleardown" packets at beginning of file only.
-                        // These currently prevent reliable ffmpeg subs detection
-                        int err = dvbsub_probe(outbuf,size,ptsnow[type]);
-                        if (err == 1)  started = 1;                          
-                        if (started) {
-                          if (err < 0 )  errpkts++;     // mark it, but pass all the same as should be validly assembled
-                          outbuf[size++] = 0xff;  // end_of_PES_data_field_marker
-                          totsubsize+=size;       // Actual subs segment data = should match ffmpeg report
-                          subspkts+=1;
-                          int pkt = savedheadersize -6 + size;  //6 for 00.00.01.bd.HH.hh, 1 for end_of_PES_data_field_marker
-                          headerstore[4]=(pkt>>8)&0xFF;
-                          headerstore[5]=(pkt   )&0xFF;
-                          // Now can output ALL re-assembled subs in a SINGLE PES pkt
-                          DEBUG("PES: *** subtitle complete PES packet with subs of %d bytes @pts %jd ***\n",size, ptsnow[type]);
-                          PD("PES: output buffered subtitle header=%p count=%d\n",headerstore,savedheadersize);
-                          int r=Output(headerstore,savedheadersize);
-                          if(r<0) return Return(-1,len);
-                          PD("PES: output buffered subtitle count=%d\n",size);
-                          r=Output(outbuf,size);
-                          if(r<0) return Return(-1,len);
-                        } else {
-                          DEBUG("PES: Skipping inital short subs packet for ffmpeg compatibility!\n");
-                        }
-                        size = 0; 
-                      }
-                    } else {
-                      if (Count > subslength - substotalthispacket) {
-//                        if (c[SubstreamHeaderLength+offset+substotalthispacket] == 0xff) {
-                        if (subslength - substotalthispacket < 6) {    //cruft or stuffing
-                          break; 
-                        }
-                        // overrun the PES packet. Keep building packet with next PES segement.
-                        overrun += subslength - substotalthispacket;
-                        DEBUG("PES: subtitle incomplete segment, requires %d vs. %d available (needs %d)\n",Count, overrun, Count-overrun);
-                        if (overrun < 0) {
-                          printf("PES: BUG! Available %d bytes, @pts %jd ***\n",overrun, ptsnow[type]);
-                          exit (1);
-                        }
-                      }
+                  if (PesHasPts(header)) {
+                    int64_t oldpts = ptsnow[type];
+                    ptsnow[type] = PesGetPts(header);
+                    if (ptsnow[type] < oldpts) {
+                      // Non-monotonic subs send ffmpeg loopy
+                      printf("PES: OOPs Non-monotonic PTS at %jd (previous %jd!) - packet dropped\n",ptsnow[type],oldpts);
                       break;
                     }
+                    int64_t ptsdiff = (PtsDiff(ptsnow[0xc0],ptsnow[type]))/90;   //millisecs
+                    DEBUG("PES: subtitle packet pts %jd, latest main audio pts %jd, subs ahead %jdms\n",ptsnow[type],ptsnow[0xc0],ptsdiff);
+                    if (ptsnow[0xc0] && abs((int)ptsdiff) > 5000) {
+                      printf("genindex: OOPs large subs timing offset! %jdms\n",ptsdiff);
+                    }
+                    if (headerSize +2 > (int)sizeof (headerstore)) {
+                      printf("PES: OOPs huge header! %d at %jd - packet dropped\n",headerSize,ptsnow[type]);
+                      break;
+                    }
+                    if (overrun) {    // continuation packets don't have a PTS AFAIK
+                      DEBUG("PES: Suspect  %d bytes left at start of new packet!\n",overrun);
+                    }                    
+
+                    memcpy (headerstore,header,headerSize);
+                    headerstore[6] |= 0x01;                     // Set "Original" - per trouble-free .ts FWiW
+
+  //                if (audiopts) PesSetPts(headerstore,audiopts);    // use existing if no audiopts
+                    
+  //                Working on theory that ffmpeg wants a DTS for some reason, copy the PTS
+  //                - it turns out that ffmpeg does this internally.
+  //                  PesSetDtsbit(headerstore);
+  //                  PesSetDts(headerstore,ptsnow[type]-18000);         // ~200ms earlier similar to other streams
+  //                  headerstore[8]+=5;                        // 5 for DTS (we know it has PES ext:this is safe)
+                  
+                    savedheadersize = headerSize+2+0;         // 5 for DTS
+                    memset (headerstore+headerSize+0,0x20,1); // subs data_identifier which is stripped below
+                    memset (headerstore+headerSize+1+0,0x00,1); // stream_id
                   }
-                  // We have a complete disassembly of the sub(s)
+                }
+
+                if (-n > SubstreamHeaderLength) {
+                  const uchar *data = c + SubstreamHeaderLength; // skip substream header
+                  int length = -n - SubstreamHeaderLength; // skip substream header
+                  if (ResetSubtitleAssembler) {
+                    dvbSubtitleAssembler->Reset();
+                  }
+                  if (length > 3) {
+                    int Count, offset;
+                    int substotalthispacket=0; 
+                    if (data[0] == 0x20 && data[1] == 0x00 && data[2] == 0x0F) {
+                      offset = 2;
+                    } else {
+                      offset = 0;
+                    }
+                    int subslength = length - offset;
+                    DEBUG("PES: Put payload length %d into dvbSubtitleAssembler\n",subslength);
+                    dvbSubtitleAssembler->Put(data + offset, subslength);
+                    while (true) {
+                      unsigned char *b = dvbSubtitleAssembler->Get(Count);    // Count = seg size *req'd*, not actual available!
+                      if (b && b[0] == 0x0F && Count > 5) {
+                        // a complete segement
+                        uchar segmentType = b[1];
+                        if (segmentType == STUFFING_SEGMENT) {
+                          continue;
+                        }
+                        if (fifo_write(&fifo, b, Count) != Count) {
+                          DEBUG("PES: FIFO error\n");
+                          Return(used,len);                        
+                        }
+                        substotalthispacket+=Count-overrun;
+                        size+=Count;
+                        DEBUG("PES: subtitle complete segment length %d type %02X, subs in fifo %d (used %d this segment)\n",Count, segmentType, size, Count-overrun);
+                        if (Count-overrun < 0) {
+                          DEBUG("PES: Suspect overrun of %d bytes!\n",overrun);
+                        }
+                        overrun=0;    // must have used up all available data at start of a new segment
+  
+                        if (segmentType == END_OF_DISPLAY_SET_SEGMENT) {
+                          uchar outbuf[KILOBYTE(64)];
+                          if (fifo_read(&fifo, outbuf, size) != size) {
+                            DEBUG("PES: FIFO error\n");
+                            Return(used,len);
+                          }
+                          // skip the small 10...80 subs periodic "cleardown" packets at beginning of file only.
+                          // These currently prevent reliable ffmpeg subs detection
+                          int err = dvbsub_probe(outbuf,size,ptsnow[type]);
+                          if (err == 1)  subsstarted = 1;                          
+                          if (subsstarted) {
+                            if (err < 0 )  errpkts++;     // mark it, but pass all the same as should be validly assembled
+                            outbuf[size++] = 0xff;  // end_of_PES_data_field_marker
+                            totsubsize+=size;       // Actual subs segment data = should match ffmpeg report
+                            subspkts+=1;
+                            int pkt = savedheadersize -6 + size;  //6 for 00.00.01.bd.HH.hh, 1 for end_of_PES_data_field_marker
+                            headerstore[4]=(pkt>>8)&0xFF;
+                            headerstore[5]=(pkt   )&0xFF;
+                            // Now can output ALL re-assembled subs in a SINGLE PES pkt
+                            DEBUG("PES: *** subtitle complete PES packet with subs of %d bytes @pts %jd ***\n",size, ptsnow[type]);
+                            PD("PES: output buffered subtitle header=%p count=%d\n",headerstore,savedheadersize);
+                            int r=Output(headerstore,savedheadersize);
+                            if(r<0) return Return(-1,len);
+                            PD("PES: output buffered subtitle count=%d\n",size);
+                            r=Output(outbuf,size);
+                            if(r<0) return Return(-1,len);
+                          } else {
+                            DEBUG("PES: Skipping inital short subs packet for ffmpeg compatibility!\n");
+                          }
+                          size = 0; 
+                        }
+                      } else {
+                        if (Count > subslength - substotalthispacket) {
+  //                        if (c[SubstreamHeaderLength+offset+substotalthispacket] == 0xff) {
+                          if (subslength - substotalthispacket < 6) {    //cruft or stuffing
+                            break; 
+                          }
+                          // overrun the PES packet. Keep building packet with next PES segement.
+                          overrun += subslength - substotalthispacket;
+                          DEBUG("PES: subtitle incomplete segment, requires %d vs. %d available (needs %d)\n",Count, overrun, Count-overrun);
+                          if (overrun < 0) {
+                            printf("PES: BUG! Available %d bytes, @pts %jd ***\n",overrun, ptsnow[type]);
+                            exit (1);
+                          }
+                        }
+                        break;
+                      }
+                    }
+                    // We have a complete disassembly of the sub(s)
+                  }
                 }
               }
             }
