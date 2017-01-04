@@ -74,6 +74,9 @@
 #------------------------------------------------------------------------------
 #
 # $Log: vdr-convert,v $
+# Revision 1.72  2017/01/04 19:29:26  richard
+# Only copy valid streams in VDR1.x files, tag mpegts as system_b
+#
 # Revision 1.71  2016/12/21 18:17:05  richard
 # missing return value from logit
 #
@@ -422,7 +425,7 @@ function convertvdr() {
     else
       echo
       logit "$1 genindex extracted $subxsize kb subtitle data" "info"
-      # convert to ffmpeg-compatible .ts (so ffmpeg can see the streams in an mpegts container - no dvb decoder for PS/PES)
+      # convert to ffmpeg-compatible .ts (so ffmpeg can see the streams in an mpegts container - no dvb subs decoder for PS/PES)
       # NOTE that iso13818ts often changes the order of streams which may be relevant for audio playback - see map fn.
       # Fix this later when reassembling streams
       tmpts="$tempdir/001.ts"
@@ -479,7 +482,7 @@ function convertvdr() {
       copyts=""
       [ "$F_SUBS" ] && copyts="-copyts"
       main="$tempdir/main.ts"
-      cmd="$ffmpeg $copyts -i "\"$tmpts"\" -c:v copy -c:a copy -sn -dn -map 0 "\"$main"\""
+      cmd="$ffmpeg $copyts -i "\"$tmpts"\" -c:v copy -c:a copy -sn -dn -map 0:u "\"$main"\""
       sh -c $cmd
       if [ $? -ne 0 ]; then
         logit "Fail: ffmpeg problem extracting main streams of $main (VDR 1.x), deleting (check $LOGFILE)" "err"
@@ -533,7 +536,7 @@ function convertvdr() {
       [ "$F_VIDEO" ] && [ $mpeg -eq 0 ] && latm="-mpegts_flags latm"
 	fi
     #copyts and content of F_SUBS is already in the map if/when req'd for VDR1.x files
-    cmd="$ffmpeg $debug_time -i "\"$main"\" $map $F_VIDEO $F_AUDIO $F_SUBS -f mpegts $latm "\"$2"\" 2>> $LOGFILE"
+    cmd="$ffmpeg $debug_time -i "\"$main"\" $map $F_VIDEO $F_AUDIO $F_SUBS -f mpegts -mpegts_flags system_b $latm "\"$2"\" 2>> $LOGFILE"
 	echo
     # Actual conversion (long)
 	logit "Executing $cmd" "info"
@@ -991,4 +994,4 @@ fi
 # remove lockfile
 quit 0
 
-# --------- $Id: vdr-convert,v 1.71 2016/12/21 18:17:05 richard Exp $ ---------- END
+# --------- $Id: vdr-convert,v 1.72 2017/01/04 19:29:26 richard Exp $ ---------- END
