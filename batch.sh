@@ -5,6 +5,9 @@
 #------------------------------------------------------------------------------
 #
 # $Log: batch.sh,v $
+# Revision 2.1  2017/04/09 12:51:15  richard
+# update
+#
 # Revision 1.3  2016/09/01 13:08:06  richard
 # Pass multiple vdr-convert flags
 # Update VDR afterwards
@@ -48,11 +51,11 @@ done
 NAMES="$(< $(pwd)/todo.txt)" #names from todo.txt file in this directory
 for NAME in $NAMES; do
 #   /bin/su vdr -c vdr-convert -i "\"$NAME"\" $args"
-  timeout -k 5h 4h sh -c "vdr-convert -i "\"$NAME"\" $args"
-  [ $? -ne 0 ] &&  logit "Fail: problem converting $NAME"
+  timeout -k 4h 3h sh -c "vdr-convert -i "\"$NAME"\" $args"
+  [ $? -ne 0 ] &&  logit "vdr-convert failed: problem converting $NAME"
 done
 
 #Ask VDR to re-read the files
 touch "$root/.update"
 
-# --------- $Id: batch.sh,v 1.3 2016/09/01 13:08:06 richard Exp $ ---------- END
+# --------- $Id: batch.sh,v 2.1 2017/04/09 12:51:15 richard Exp $ ---------- END
