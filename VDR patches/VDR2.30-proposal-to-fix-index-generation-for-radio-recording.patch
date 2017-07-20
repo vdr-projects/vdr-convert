@@ -3,8 +3,6 @@ From: Thomas Reufer <thomas@reufer.ch>
 Date: Mon, 13 Jun 2016 16:42:03 +0200
 Subject: [PATCH 9/9] proposal to fix index generation for radio recordings
 
-#RF modified for VDR2.20
-
 ---
  recording.c | 8 ++++----
  remux.c     | 4 +++-
@@ -57,16 +55,15 @@ index cfb6ae3..df38add 100644
       }
    else
       esyslog("ERROR: can't parse PMT");
-@@ -1464,7 +1466,8 @@ void cFrameDetector::SetPid(int Pid, int Type)
-      parser = new cMpeg2Parser;
-   else if (type == 0x1B)
+@@ -1541,7 +1543,7 @@ void cFrameDetector::SetPid(int Pid, int Type)
       parser = new cH264Parser;
+   else if (type == 0x24)
+      parser = new cH265Parser;
 -  else if (type == 0x04 || type == 0x06) // MPEG audio or AC3 audio
-+// RF add support for AAC, AAC_LATM
 +  else if (type == 0x03 || type == 0x04 || type == 0x06 || type == 0x0F || type == 0x11) // MPEG2,4 AAC, AC3 audio
       parser = new cAudioParser;
    else if (type != 0)
-      esyslog("ERROR: unknown stream type %d (PID %d) in frame detector", type, pid);     
+      esyslog("ERROR: unknown stream type %d (PID %d) in frame detector", type, pid);
 diff --git a/remux.h b/remux.h
 index bd0d145..80528bd 100644
 --- a/remux.h
