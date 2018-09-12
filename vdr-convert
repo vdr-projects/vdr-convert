@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# VDR-convert Copyright (C) 2014-2017 Richard Farthing
+# VDR-convert Copyright (C) 2014-2018 Richard Farthing
 
 # A shell script to convert VDR recordings to ts using H264/H265 and AAC
 
@@ -72,6 +72,19 @@
 #------------------------------------------------------------------------------
 #
 # $Log: vdr-convert,v $
+# Revision 2.2  2018/09/12 12:10:10  richard
+# Added --podcast option: podcasts stored in subdirectories, by Title
+# Podcast audio codec config: Can use (HE)AAC, MP3 or Opus
+# Extensive embedding of metadata in output files (mainly for podcasts)
+# Added -g option for genre files to define mapping of VDR's G tag to text
+#
+# Significant H265 setting updates to reflect recent improvements
+# Slight H264 compression increase to reflect recent improvements
+# More extensive checking of ffmpeg build options (codec library checks)
+# Detect short initial recording files & delete (VPS aborted start)
+# Various other fixes and improvements, incl. for FTP/redo modes
+# Fixes for recent ffmpeg versions (3.3+)
+#
 # Revision 2.1  2017/04/09 12:55:43  richard
 # Option to convert to H265/HEVC via new -v switch, with potential for file size 1/2 of H264, 1/4 of MPEG2
 # Multiple format options in single-use/batch modes via -f flag: avi, mkv, mp4, mov, m2ts, ts, aac, m4a and mp3
@@ -140,6 +153,8 @@
 # FFmpeg bug (some subtitles not handled) https://trac.ffmpeg.org/ticket/5796
 # FFmpeg bug (H265 aspect ratio) https://trac.ffmpeg.org/ticket/5959
 #
+# Improve detection of 5.1 when it's not present at the start of the recording
+#
 # ********************************* << TODO ***********************************
 #
 # *********************** CONSTANTS / USER CONFIG ***************************** 
@@ -153,7 +168,8 @@ log_facility='local2'
 # Timeout req'd for troublesome conversions where ffmpeg can (rarely) get stuck. However causes issues when run interactively.
 ffmpeg='ffmpeg'
 # Override for my develeopment build incorporating patches for broken recordings
-[ "$HOSTNAME" = 'ha-server' ] && ffmpeg='/opt/data/develop/FFmpeg/ffmpeg'
+myserver="ha-server"
+[[ $HOSTNAME == $myserver* ]] && ffmpeg='/opt/data/develop/FFmpeg/ffmpeg' 
 
 # Minimum filesize we bother to convert
 minsize='2000000'
@@ -175,9 +191,9 @@ email='root'    # your email for critical error messages (optional)
 # *********************** Default conversion parameters ***********************
 
 # Tuned to give balance of reasonable size and quality
-stereobitrate=128           # single use
-stereobitrate_k=160         # when keeping
-minbitrate=100              # Absolute min for stereo streams
+stereobitrate=120           # single use
+stereobitrate_k=150         # when keeping
+minbitrate=100              # Absolute min (LC) for stereo streams
 
 #aac, 5.1 etc, BBC AAC output reported as 200
 #Note due to issues around nonfree AAC encoders and need to specially compile
@@ -192,18 +208,17 @@ monobitrate=50
 # (see http://www.techspot.com/article/1131-hevc-h256-enconding-playback/page7.html)
 presetH264='veryfast'   # H264 sweetspot is veryfast
 presetH264_k='medium'
-presetH265='ultrafast'  # H265 sweetspot is ultrafast. Superfast is similar
-presetH265_k='slow'     # SLOW for reduced blocky artefacts when keeping. medium is OK, but some artefacts
+presetH265='veryfast'  # H265 sweetspot is also now veryfast. Superfast has visible artefcts around text
+presetH265_k='medium'  # medium now OK
 # CRITICAL/Blocking ffmpeg/x265 cannot handle aspect ratio switch https://trac.ffmpeg.org/ticket/5959
-# H265 slow (<real time on dual core) + RPi v1 cannot handle. 
-# ~25% saving if same CRF used. Claim is x264 default 23 = x265 default 28. More like 26 IMHO
-# x265: CRF 26 vs. x264: CRF 23 Saves ~1/3 on veryfast preset
-qualityx265=4   # for x265 add to x264 setting for similar quality to x264 (should be 5 eventually)
+# H265 is slow (~real time on a dual core in normal mode, even slower in keep), RPi v1 cannot handle.
+
+qualityx265=5   # for x265 adder to x264 setting for similar quality to x264
 
 # The following can be overridden by command line parameters
 
-quality=23      # single use)
-quality_k=20.5  # when keeping
+quality=23      # single use
+quality_k=21    # when keeping - was 20.5, H264 improved a little
 top=0           # optional cropping
 maintain=0      # copy streams
 j=0
@@ -219,11 +234,29 @@ debug=0     # In debug mode, only short conversions are done, and intermediate f
 debug_time=""
 combine=0   # concatenate files before conversion. VDR1.x limit is a total 16GB (in Genindex)
 vcodec=264      # 264 for H264, or 265 for HEVC and ffmpeg built with appropriate library support
-acodec='aac'    # aac, libfdk_aac (if ffmpeg built with support) or libmp3lame
-# libfdk is supposed to be better, but (to me) doesn't sound subjectively better.
-# It's a bit faster to encode, probably by using fixed point maths
+acodec='aac'    # aac, libfdk_aac (if ffmpeg built with support) or libmp3lame, again with support
+# libfdk is commonly said to be best, but (to me) doesn't sound subjectively any different
+# ffmpeg themselves claim parity as of 2017. Others disagree.
+# But libfdk is signifcantly faster to encode by using fixed point maths, and importantly provides HE-AAC
 
 ext='ts'    # default file format extension
+
+# *** Podcast settings ***
+# see https://wiki.hydrogenaud.io/index.php?title=Fraunhofer_FDK_AAC
+# Listening tests show that >= 32k is OK on HE-AAC v2.
+# IMDA Guidelines for Broadcasters 2013: "...with a sweet spot at 48 kb/s"
+# No available USAC/xHE-AAC codec yet in ffmpeg, and OPUS doesn't support 44.1kHz sample rate
+# NOTE that Squeezeplayers on Joggler don't support 48k sample rate (in m4a anyway), so resample to 44.1k
+# libsoxr supposed to be higher quality resampler (sounds a bit better, usu. requires custom ffmpeg build)
+# MKV supports slightly better metadata, LMS doesn't recognise by default.
+
+podcastaudioprofile="libfdk_aac -profile:a aac_he_v2 -b:a 48k -af aresample=resampler=soxr -ar 44100"
+# podcastaudioprofile="libmp3lame -b:a 80k -af aresample=resampler=soxr -ar 44100"  # MP3
+# podcastaudioprofile="libopus -b:a 48k"      # Opus - Can't downsample to 44.1
+
+# Post conversion commands, e.g. to tell VDR a recording has been deleted AND
+# command a Squeezeserver to rescan its library after making a new podcast. Amend as required or leave blank
+podcastcmd="touch /mnt/lvm/TV/.update;curl -m 3 http://$myserver:9000/status.suffix?p0=rescan > /dev/null 2>&1"
 
 # ********************* Should not need to edit below here ********************
 
@@ -242,10 +275,6 @@ IFS=$'\n'
 SECONDS=0
 duration=0
 ts=0
-
-# Exists?
-command -v $ffmpeg >/dev/null 2>&1 || { echo "$0 requires 'ffmpeg' but it's not in the path/config,  Aborting."; exit 1; }
-ffmpeg="nice -n 19 "$ffmpeg" -y -hide_banner -nostats -probesize 250M -analyzeduration 600M -copytb 1"
 
 #------------------------------------------------------------------------------
 # STREAM PROCESSING FUNCTIONS
@@ -322,7 +351,19 @@ function map() {
       [ $(echo $line |grep -i "mpeg2video") ] && v_source_codec=262
       [ $(echo $line |grep -i "h264") ] && v_source_codec=264
       [ $(echo $line |grep -i "h265\|hevc") ] && v_source_codec=265
-      [ $maintain -eq 1 ] && vcodec=$v_source_codec
+      if [ $maintain -eq 1 ]; then 
+        vcodec=$v_source_codec
+      else
+        # Skip at the final mappping stage - we have encoded video then (H264 etc)
+        # might want to compress more (even with same codec) for temp use, but never if keeping. Warn not error as auto-runs on HD recordings
+        if [ ! $3 ] && [ $v_source_codec -ge $vcodec ]; then
+          if [ $keep -eq 1 ]; then
+            echo; logit "Skipping $1 already compressed with equal/higher vcodec (H$v_source_codec)" "warn" && return 2
+          else 
+            echo; logit "Note: $1 already compressed with equal/higher vcodec (H$v_source_codec)" "info"
+          fi
+        fi
+      fi
 
       # Notes on ffmpeg video parameters:
       # ---------------------------------
@@ -348,14 +389,8 @@ function map() {
         flags="+loop+ilme+ildct"
       fi
 	  if [ $vcodec -eq 265 ]; then
-        # NOTE these params subject to change as x265 improves
-        if [ $keep -eq 1 ]; then 
-          q=$(echo "$quality + $qualityx265"|bc)  # FP calc, adjust CRF for x265
-          preset=$presetH265_k
-        else
-          q=$quality        # we should normally adjust as above, but using a fast preset, best not
-          preset=$presetH265
-        fi
+        q=$(echo "$quality + $qualityx265"|bc)  # FP calc, adjust CRF for x265
+        [ $keep -eq 1 ] && preset=$presetH265_k || preset=$presetH265
         VIDEO[$stream_id]="-c:v:stream_op libx265 -preset $preset -crf $q -g 50 -flags $flags $extras $deint $crop"
       elif [ $vcodec -eq 264 ]; then
         q=$quality
@@ -380,15 +415,17 @@ function map() {
       AUDIO[$stream_id]="-c:a:stream_op copy -metadata:s:a:stream_op language=$Alangsurround"
       [ $(echo $ext |grep -i "mp3") ] && logit "Fail: multichannel audio will not work with $ext format" "err" && quit 1
 	elif [ $(echo $line |grep -i "audio" |grep -i "aac") ]; then
-      # We don't use Opus/HE-AAC as barely better at bitrates we're interested in
-      # AAC (e.g from HD recording) best left as is. We can't always detect AAC 5.1, and sometimes not the bitrate
+      # We don't normally use Opus/HE-AAC as barely better at bitrates we're interested for AV transcodes. Opus is really only 48k
+      # AAC (e.g from HD recording) best left as is. We can't always detect AAC 5.1 (e.g starts in continuity in stereo), sometimes not the bitrate
+      # Doesn't matter how long you probe for, may still miss 5.1 AAC. Only safe way is copy
+
       # lower the risk - just copy the stream
       if [ $keep -eq 1 ]; then
         [ ! $(echo $acodec |grep -i "aac") ] && logit "Fail: unsupported request for non-aac codec with aac source, exiting" "err" && quit 1
         mapst="$mapst D:$((10000 - $bitrate)):$stream_id"
         AUDIO[$stream_id]="-c:a:stream_op copy -metadata:s:a:stream_op language=$Alangstereo"
       else
-        # Take the risk for single-use, still outside chance it's multichannel and could fail
+        # Take the risk for single-use, still an outside chance it's multichannel and could fail or end up as stereo
         audio_bitrate $bitrate $3
         mapst="$mapst E:$((10000 - $outputbitrate)):$stream_id"
         AUDIO[$stream_id]="-c:a:stream_op $acodec -b:a:stream_op $outputbitrate"k" -metadata:s:a:stream_op language=$Alangstereo"
@@ -421,7 +458,7 @@ function map() {
 
   # Order streams by initial alpha AND bitrate to fix stream order change by iso13818ts, or random broadcaster ordering
   # (many players only play the first audio stream without user intervention). Produces "best" audio first, a bit like ffmpeg
-  # Note that stream ordering (as reported by ffmpeg) has been observed varying between recording files in same recording!
+  # Note that stream ordering (as reported by ffmpeg) has been observed varying between recording files even in same recording!
   echo;echo "Stream scoring: $mapst"
   saveifs=$IFS
   IFS=' '
@@ -441,12 +478,52 @@ function map() {
   done
   IFS=$saveifs
 
-  map="$map$mapping"   # Additive complete map where needed
-  echo;echo "stream mapping for $1 is:"
-  echo "Map:  $map"
-  # Only report stream codec info when relevent
-  [ ! $3 ] && echo "Video:$F_VIDEO" && echo "Audio:$F_AUDIO" && echo "Subs: $F_SUBS"
+  # Podcast mode: This is the earliest we guarantee to know that there's only audio, so we can make a decision in podcast mode:
+  # replace the acodec string: drop the bitrate down and set the podcast profile [HE-AAC V2 normally]
 
+  # If we're mapping at final merge stage,  don't zap the podcast flag etc, we may be just creating filename (e.g redo)
+  if [ ! $3 ]; then
+    if [ "$podcast" ]; then
+      if [ ! "$F_VIDEO" ] && [ "$F_AUDIO" ]; then
+        [ $acount -ne 1 ] && logit "Fail: Audio Podcast mode & audio stream count not 1: exiting" "err" && quit 1
+        [ ! "$genrefile" ] && logit "Warning: Podcast requires genre definition file to create correct metadata tags" "warn"
+        if [ $(echo $podcastaudioprofile | grep 'aac_he') ] && [ ! $(echo $ffmpegbuild | grep 'libfdk') ]; then
+          logit "Podcast profile requires ffmpeg built with libfdk_aac for HE-AAC" && quit 1
+        fi
+        if [ $(echo $podcastaudioprofile | grep 'soxr') ] && [ ! $(echo $ffmpegbuild | grep 'libsoxr') ]; then
+          logit "Podcast mode reqesting libsoxr but not available in this ffmpeg build - using built-in resampler" "info"
+          podcastaudioprofile=$(echo $podcastaudioprofile | sed -e "s/soxr/swr/")
+        fi
+        if [ $ext = "ts" ]; then  # ts default, useless for podcasts: override to avoid errors or -f option
+          ext="m4a"
+          [ $(echo $podcastaudioprofile | grep 'libmp3') ] && ext="mp3" 
+          [ $(echo $podcastaudioprofile | grep 'libopus') ] && ext="opus"
+        fi
+        F_AUDIO=$(echo $F_AUDIO | sed -e "s/\(-c:a:0\).*\(-metadata\)/-c:a:0 $podcastaudioprofile -metadata/")
+        concatflags="-movflags +faststart" 	    # help any streaming
+        keep=0      # and we not keeping it: VDR may not support HE-AAC V2
+      else          # video podcast anyone ?
+        if [ $keep -eq 0 ]; then
+          # Not a good idea - single-use modes don't do enough QA
+          [ $delete -eq 1 ] && delete=0 && logit "Won't delete originals in single-use modes" "warn"
+        else
+          ext="ts"  # force ts in keep mode for VDR compatibility. No codec adjustments
+        fi
+      fi
+    else
+      if [ $keep -eq 0 ]; then
+        [ $delete -eq 1 ] && delete=0 && logit "Won't delete originals in single-use modes" "warn"
+      else
+        ext="ts"
+      fi
+    fi
+    # Only report stream codec info when actually relevent/correct
+    echo "Video:$F_VIDEO" && echo "Audio:$F_AUDIO" && echo "Subs: $F_SUBS"
+  fi
+  map="$map$mapping"   # Additive complete map where needed
+  echo;echo "stream mapping for $1:"
+  echo "Map:  $map"
+#  echo "debug!"; exit
   return 0
 }
 
@@ -555,6 +632,8 @@ function transcode() {
           # ffmpeg used to report EXACTLY the same size, newer versions perhaps not
           [ $subxsize -ne $subslen ] && logit "Warning: ffmpeg reported different subs size to genindex (VDR 1.x) for $1 ($subslen kb vs. $subxsize kb)"
           map $subsfile 1
+          ret=$?
+          [ $ret -gt 0 ] && logit "internal error, video in subs file!" "err" && return 1     # should never happen
           map="-i \"$subsfile\" $F_SUBS $map"
           echo;echo "Final subs map is $map"
           echo
@@ -591,7 +670,9 @@ function transcode() {
       if [ $debug -eq 0 ]; then
         rm -f "$tmpts" || logit "could not remove $tmpts" "err"
       fi
-      map $main 0       # Additive map (add in subs file/map as reqd). NOTE Loses F_SUBS !
+      map $main 0                   # Additive map (add in subs file/map as reqd). NOTE Loses F_SUBS !
+      ret=$?
+      [ $ret -gt 0 ] && return $ret # same or higher vcodec
     fi
     #end VDR1.x
   else
@@ -599,6 +680,8 @@ function transcode() {
     progduration $main
     program_duration=$(($program_duration + $duration))   # combine all files.
     map $main 0
+    ret=$?
+    [ $ret -gt 0 ] && return $ret   # same or higher vcodec
     if [ $subs -eq 1 ]; then
       if [ ! "$F_SUBS" ]; then
         # only report subs if there is video to support them
@@ -621,7 +704,7 @@ function transcode() {
               echo "Empty subtitles stream for $main, discarding"
             else
               # a few subs means properly suspect
-              delete=0 && logit "Possible fail: not deleting originals for $main due to suspect subtitle stream size - please check" "err"
+              delete=0 && logit "Warning: not deleting originals for $main due to suspect subtitle stream size - please check" "err"
             fi
           fi
         fi
@@ -633,48 +716,86 @@ function transcode() {
     [ $j -eq 1 ] && logit "Subtitles ready in $subsfile" "info" && return 2
   fi
 
-  # The main conversion. Report mapping results to info file
-  reportedvideo=$F_VIDEO
-  reportedaudio=$F_AUDIO
+  # The main conversion. 
 
   if [ "$F_AUDIO" ]; then     # Only if we see something meaningful (may be only audio if radio recording)
 	if [ $keep -eq 1 ]; then
-      # might want to compress more (even with same codec) for temp use, but never if keeping. Warn not error as auto-runs on HD recordings
-      [ $v_source_codec -ge $vcodec ] && [ $maintain -eq 0 ] && logit "Skipping $main: already compressed with equal/higher codec (H$v_source_codec)" "warn" && return 2
-      # LATM multiplexing matches broadcast MPEG4 SD/HD audio streams, but can't currently be demuxed to plain AAC by FFMPEG
+      # LATM multiplexing matches broadcast MPEG4 SD/HD audio streams, but can't be demuxed to plain AAC by older FFMPEG versions
       # So even if keeping (e.g. automatic VDR transcode), and no video, use plain AAC so can transcode again if req'd (e.g podcast)
-      [ "$F_VIDEO" ] && [ $vcodec -ge 264 ] && [ $(echo $acodec |grep -i "aac") ] && latm="-mpegts_flags latm"    # H264/5 + AAC use latm
-    else
-      [ $v_source_codec -ge $vcodec ] && [ $maintain -eq 0 ] && logit "Note: $main: already compressed with equal/higher codec (H$v_source_codec)" "info"
+      if [ "$F_VIDEO" ] && [ $vcodec -ge 264 ] && [ $(echo $F_AUDIO |grep -i "aac") ]; then
+        latm="-mpegts_flags latm"     # H264/5 + AAC we use latm
+        # fdk codec param(s) also need to be specially tweaked here to produce latm (mpegts flags above don't do it!)
+        [ $(echo $F_AUDIO |grep -i "libfdk_aac") ] && F_AUDIO=$(echo $F_AUDIO | sed -e "s/libfdk_aac/libfdk_aac -latm 1/g")
+      fi
 	fi
     #copyts and content of F_SUBS is already in the map if/when req'd for VDR1.x files
-    [ $framerate -eq 25 ] && dvbsystem="-mpegts_flags system_b"  #DVB
-    cmd="$ffmpeg $debug_time -i "\"$main"\" $map $F_VIDEO $F_AUDIO $F_SUBS -f mpegts $dvbsystem $latm "\"$2"\" 2>> $LOGFILE"
+    [ $framerate -eq 25 ] && dvbsystem="-mpegts_flags system_b"  #DVB not ATSC
+    #muxing queue issues since ffmpeg 3.3
+    cmd="$ffmpeg $debug_time -i "\"$main"\" $map $F_VIDEO $F_AUDIO $F_SUBS -f mpegts $dvbsystem $latm -max_muxing_queue_size 4000 "\"$2"\" 2>> $LOGFILE"
 	echo
-    # Actual conversion (long)
+    # Actual conversion (slow)
 	logit "Transcoding with $cmd" "info"
 	sh -c $cmd
 	if [ $? -ne 0 ]; then
-	  logit "Fail: ffmpeg problem transcoding $input, deleting "\"$2"\" !" "err"
+	  logit "Fail: ffmpeg problem transcoding '$input', deleting "\"$2"\" !" "err"
       rm -f "$2" || logit "could not remove "\"$2"\"" "err"
 	  return 1
 	fi
     # Now re-test/compare after conversion in case ffmpeg lost some (still keep for examination in case really OK)...
-    # F_SUBS for VDR2 conversions, copyts for VDR1.x
+    # F_SUBS for VDR2 conversions, copyts for VDR1.x. Widened tolerance due to errors when re-transcoding
     if [ "$F_SUBS" ] || [ $copyts ]; then
       subslength $2 "/dev/null"
       [ $? -ne 0 ] && return 1
-      [ $(($len+10)) -lt $subslen ] && logit "Fail: ffmpeg did not process all subs for $input (input $subslen kb, output $len kb)" "err" && return 1
+      [ $(($len+90)) -lt $subslen ] && logit "Fail: ffmpeg did not process all subs for '$input' (input $subslen kb, output $len kb)" "err" && return 1
     fi
     # clean up
   else
-	logit "Fail: Nothing to transcode for $input !" "err"
+	logit "Fail: Nothing to transcode for '$input' !" "err"
 	return 1
   fi
   if [ $VDRtype ] && [ $debug -eq 0 ]; then
     rm -rf "$tempdir" || logit "could not remove $tempdir" "err"
   fi
   map=""      # clear in case we process more files
+
+  #Report mapping to the info file
+  reportedvideo=$F_VIDEO
+  reportedaudio=$F_AUDIO
+  return 0
+}
+
+#------------------------------------------------------------------------------
+# Basic QA of the output filesize/duration to make sure it's OK
+# Return 1 for a fail, else 0
+
+function check_duration() {
+  # check for duration match within 30s (empirical magic number)
+  progduration $outfile
+  if [ $debug -eq 0 ] && [ $(($duration + 30)) -lt $program_duration ]; then
+    logit "Warning: $outfile, size $(($outputsize/$meg))M, is only $duration sec long, original $(($inputsize/$meg))M, with length detected as $program_duration sec" "err"
+    return 1
+  fi
+  # check for silly compression ratio, or larger file, heaven forbid!)
+  if [ "$F_VIDEO" ]; then
+    [ $vcodec -eq 262 ] && mult=3     # MPEG original
+    [ $vcodec -eq 264 ] && mult=9     # x264: 1/3 of original
+    [ $vcodec -eq 265 ] && mult=12    # x265 1/4 of original
+    if [ $debug -eq 0 ] && [ $(($inputsize * 3)) -gt $(($outputsize * $mult)) -o $outputsize -gt $inputsize -a $maintain -eq 0 ]; then
+      logit "Warning: Suspect size of $outfile, (new $(($outputsize/$meg))M vs. original $(($inputsize/$meg))M)" "err"
+      # keep converted outfile, actually it may be OK
+      return 1
+    fi
+  else    # so must be audio only...
+    mult=4  #default. ok or mp3
+    [ $(echo $reportedaudio |grep -i "aac") ] && mult=3     # normal, mild compression
+    [ $(echo $reportedaudio |grep -i "aac_he") ] && mult=8  # podcast usually
+    [ $(echo $reportedaudio |grep -i "libopus") ] && mult=8 # podcast usually
+    if [ $debug -eq 0 ] && [ $inputsize -gt $(($outputsize * $mult)) -o $outputsize -gt $inputsize -a $maintain -eq 0 ]; then
+      logit "Warning: Suspect size of $outfile, (new $(($outputsize/$meg))M vs. original $(($inputsize/$meg))M)" "err"
+      # keep converted outfile, actually it may be OK
+      return 1
+    fi
+  fi
   return 0
 }
 
@@ -734,20 +855,25 @@ function edl() {
 #------------------------------------------------------------------------------
 # Upload to an ftp server for faster remote download.
 # Note that ncftp is not always reliable, seems to randomly quit. 
-# Ideally need to a size compare & retry function
 # NCFTP debug logs don't really help
 
 function upload() {
   logit "Uploading $1"
-  sh -c "ncftpput -z -t 99 -u \"$user\" -p \"$pass\" \"$server\" \"$ftppath\" \"$1\" &"
+  sh -c "ncftpput -z -t 99 -u \"$user\" -p \"$pass\" \"$server\" \"$ftppath\" \"$1\" 1>&2 &"
 }
 
 function usage() {
-  echo "usage: $0 --input-path | -i \"<recording.rec>\" [--keep |-k] [--combine |-c] [--delete |-d] [--acodec |-a aac|libfdk_aac|libmp3lame] [--vcodec |-v 264|265] [--format |-f <extension>] [--extras |-e \"<ffmpeg opts>\"] [--just-subs |-j] [--nosubs] |-n] [--life |-l <days>] [--maintain |-m] |--quality |-q <CRF>] [--yadif |-y 0|1] [--tsonly |-t] [--crop-top <lines>] [--ftp] [--ftp-path <target path>] [--redo] |-r ] [--server |-s] [--user |-u] [--pass |-p]"
+  echo "usage: $0 --input-path | -i \"<recording.rec>\" [--keep |-k] [--combine |-c] [--delete |-d] [--acodec |-a aac|libfdk_aac|libmp3lame] [--vcodec |-v 264|265] [--format |-f <extension>] [--extras |-e \"<ffmpeg opts>\"] [--just-subs |-j] [--nosubs] |-n] [--life |-l <days>] [--maintain |-m] |--quality |-q <CRF>] [--yadif |-y 0|1] [--tsonly |-t] [--crop-top <lines>] [--ftp] [--ftp-path <target path>] [--redo] |-r ] [--server |-s] [--user |-u] [--pass |-p] [--podcast <target-path>] [--genrefile |-g <path/file>]"
 }
 
-function escape() { 
-  sed 's/'"'"'/'"\'"'/g'
+function escape_apostrophe() {
+   echo $($1 | sed 's/"/\\\"/g')
+}
+
+# return key=value, escaped, but only if the value exists (alert missing ones)
+function create_meta() {
+#   [ "$2" ] && echo "-metadata $1=\"$(echo $2|sed -e 's/[;\]//g'|sed "s/'/\\\'/g"|sed 's/"/\\\"/g')"\"||echo "NOTE: -metadata $1 is missing" 1>&2
+   [ "$2" ] && echo "-metadata $1=\"$(echo $2|sed -e "s/&quot;/\\\'/g"|sed -e 's/[;\]//g'|sed "s/\"/'/g")"\"||echo "NOTE: -metadata $1 is missing" 1>&2
 }
 
 function Repeat() {
@@ -770,6 +896,7 @@ function cleanup() {
   else
     echo "Without debug command=$cmd"
   fi
+  return 0
 }
 
 # return code 0 is OK, some stats to report, 2 is OK, but we did nothing/no meaningful stats, 1 is some kind of error
@@ -777,7 +904,10 @@ function quit() {
   rm -f "$LOCKFILE" || { logit "failed to delete $LOCKFILE" "err"; exit 1; }
   echo
   [ $1 -eq 2 ] && exit 0
-  [ $1 -eq 0 ] && logit "Completed: $NAME, Runtime: $(printf "%02d:%02d:%02d" $(($SECONDS / 3600))  $((($SECONDS / 60) % 60)) $(($SECONDS % 60))) ($(printf "%.1f" $(echo "$duration/$SECONDS"|bc -l))X)"
+  if [ $1 -eq 0 ]; then
+    [ $redo -eq 0 ] && quitmsg=", Runtime: $(printf "%02d:%02d:%02d" $(($SECONDS / 3600))  $((($SECONDS / 60) % 60)) $(($SECONDS % 60))) ($(printf "%.2f" $(echo "$duration/$SECONDS"|bc -l))X)"
+    logit "Completed: $BASENAME$quitmsg"
+  fi
   exit $1
 }
 
@@ -800,7 +930,7 @@ while [ "$1" != "" ]; do
                                 acodec=$(echo "$1"|sed -e 's/[^a-z0-9_]//g')
                                 ;;
         -v | --vcodec )         shift
-                                vcodec=$(echo "$1"|sed -e 's/[^0-9]//g')
+                                vcodec=$(echo "$1"|sed -e 's/[^0-9]{3}//g')
                                 ;;
         -c | --combine )        combine=1
                                 ;;
@@ -812,6 +942,9 @@ while [ "$1" != "" ]; do
         -f | --format )         shift
                                 ext=$(echo "$1"|sed -e 's/[^a-z0-9]//g')
                                 ;;
+        -g | --genrefile )      shift
+                                genrefile=$(echo "$1"|sed -e 's/[^A-Za-z0-9._-/]//g')
+                                ;;                               
         -j | --just-subs )      j=1
                                 combine=1
                                 ;;
@@ -834,12 +967,12 @@ while [ "$1" != "" ]; do
                                 ;;
 		-t | --tsonly )			ts=1
 								;;
-        --ftp  )                ftp=1
-                                ;;
         -r | --redo )           redo=1
                                 ;;
+        --ftp  )                ftp=1
+                                ;;
 		--ftp-path )			shift
-								ftppath="$1"
+								ftppath=$(echo "$1"|sed -e 's/[^A-Za-z0-9._-/]//g')   # sanitise dir/file
 								;;
         -s | --server )         shift
                                 server="$1"
@@ -849,6 +982,9 @@ while [ "$1" != "" ]; do
                                 ;;
         -p | --pass )           shift
                                 pass="$1"
+                                ;;
+        --podcast )             shift
+                                podcast=$(echo "$1"|sed -e 's/[^A-Za-z0-9._-/]//g')
                                 ;;
         -h | --help )           usage
                                 exit 0
@@ -861,25 +997,53 @@ done
 
 Repeat - 120 
 echo
-[ ! -d "$input" ] && logit "Recording directory '"$input"' doesn't exist!" && exit 1
+
+[ $vcodec -lt 264 ] || [ $vcodec -gt 265 ] && usage && exit 1
+[ $ext == "mp3" ] && acodec="libmp3lame"
+
+# ffmpeg exists?
+command -v $ffmpeg >/dev/null 2>&1 || { echo "$0 requires 'ffmpeg' but it's not in the path/config,  Aborting."; exit 1; }
+ffmpegbuild=$($ffmpeg 2>&1)  # get build options to check feature compatibility
+
+[ $vcodec -eq 264 ] && [ ! $(echo $ffmpegbuild | grep 'libx264') ] && logit "$0 requires ffmpeg built with at least libx264" && exit 1
+[ $vcodec -eq 265 ] && [ ! $(echo $ffmpegbuild | grep 'libx265') ] && logit "ffmpeg is not built with libx265" && exit 1
+[ $acodec = "libfdk_aac" ] && [ ! $(echo $ffmpegbuild | grep 'libfdk') ]  && logit "ffmpeg is not built with libfdk_aac for AAC" && exit 1
+[ $acodec = "libmp3lame" ] && [ ! $(echo $ffmpegbuild | grep 'libmp3lame') ]  && logit "ffmpeg is not built with libmp3lame for MP3" && exit 1
+
+# create deep probes
+ffmpeg="nice -n 19 "$ffmpeg" -y -hide_banner -nostats -probesize 250M -analyzeduration 600M -copytb 1"
+
+[ ! -d "$input" ] && logit "Recording directory '$input' doesn't exist!" && exit 1
 [ $dif ] && [ $dif -gt 1 ] && echo "deinterlacer config must be 0 or 1" && usage && exit 1
 
 if [ $keep -eq 1 ]; then
   command -v vdr >/dev/null 2>&1 || { echo "$0 requires 'vdr' but it's not in the path,  Aborting."; exit 1; }
-  [ $ext != 'ts' ] && echo "$ext format not directly supported by VDR" && exit 1
-else 
-  # Not a good idea - single-use mode doesn't do enough QA
-  [ $delete -eq 1 ] && echo "$0 won't delete originals in single-use mode" &&  exit 1
+#  [ $ext != 'ts' ] && echo "$ext format not directly supported by VDR" && exit 1
 fi
 
-# Adjustments to interdependent parameters
+xmit=$(($ftp + $redo))
+if [ $xmit -gt 0 ]; then
+  command -v ncftpput >/dev/null 2>&1 || { echo "$0 FTP functions require 'ncftp' but it's not in the path/config,  Aborting."; exit 1; }
+  [ $xmit -gt 1 ] && { echo "$0 Cannot FTP and Redo! - Aborting."; exit 1; }
+fi
+
+# *** Adjustments to interdependent parameters ***
+
 [ $ext == "mp4" ] || [ $ext == "avi" ] && [ $subs -eq 1 ] && subs=0 && logit "Warning: subs not supported in $ext format: discarded if present" "warn"
-[ $vcodec -lt 264 ] || [ $vcodec -gt 265 ] && usage && exit 1
 [ $top -gt 0 ] && [ $maintain -eq 1 ] && echo "Can't crop without re-encoding" && exit 1
 
-# help Fraunhofer codec produce full(er) range - default cutoff 14kHz @low bitrates
-[ $acodec == "libfdk_aac" ] && acodec="$acodec -cutoff 18000"
-[ $ext == "mp3" ] && acodec="libmp3lame"
+# help Fraunhofer codec produce full(er) range - default cutoff 14kHz @low bitrates.
+[ $acodec == "libfdk_aac" ] && acodec="$acodec -cutoff 17000"
+
+if [ "$podcast" ]; then
+  [ ! -d "$podcast" ] && logit "Podcast directory '"$podcast"' doesn't exist!" && exit 1
+  outputdir=$podcast
+else
+  outputdir=$(pwd)    # current dir is default
+fi
+[ ! -w $outputdir ] && logit "Can't write to output directory" "err" && exit 1
+
+[ "$genrefile" ] && [ ! -f "$genrefile" ] && logit "Genre definitions file '"$genrefile"' doesn't exist!" && exit 1
 
 # VDR has been known to "start/stop" multiple times at the end of a recording (VPS?) - so prevent multiple instances
 LOCKFILE="$input/vdr-convert.pid"
@@ -889,15 +1053,13 @@ if [ -e "$LOCKFILE" ]; then
   # lockfile exists
   [ -r "$LOCKFILE" ] || { logit "Error: cannot read lockfile"; exit 1; }
   PID=$(cat "$LOCKFILE")
-  kill -0 "$(cat "$LOCKFILE")" 2>/dev/null && { logit "Error: existing instance of $0 is already running, exiting"; exit 1; }
+  kill -0 "$(cat "$LOCKFILE")" 2>/dev/null && logit "Error: existing instance of $0 is already running, exiting" && exit 1
   # process that created lockfile is no longer running - delete lockfile
   rm -f "$LOCKFILE" || { logit "Error: failed to delete $LOCKFILE"; exit 1; }
 fi
 
 # create lockfile
 echo $$ >"$LOCKFILE" || { logit "Error: cannot create lockfile for $0"; exit 1; }
-
-logit "Processing "\"$input"\", keep=$keep, delete=$delete, combine=$combine, format=$ext, subs=$subs, extras=$extras" "info"
 
 # VDR filetypes 1.x (PES) or 2.x (TS), based on filenames in recording directory
 
@@ -917,13 +1079,14 @@ else
  VDRtype=""
  FILES="$input/0*.ts"
 fi
-#count=(`echo $FILES | wc -w`)
 
 if [ $VDRtype ]; then
-  [ $ts -eq 1 ] && logit "Skipping $input, t flag and not an mpegts (VDR2.x) recording" && quit 2
+  [ $ts -eq 1 ] && logit "Skipping '$input', t flag and not an mpegts (VDR2.x) recording" && quit 2
   command -v genindex >/dev/null 2>&1 || { echo "$0 requires 'genindex' for VDR1.x conversions, but it's not in the path,  Aborting."; quit 1; }
   command -v iso13818ts >/dev/null 2>&1 || { echo "$0 requires 'iso13818ts' for VDR1.x conversions, but it's not in the path,  Aborting."; quit 1; }
 fi
+
+logit "Processing '$input' (files=$(($vdrfiles + $tsfiles))), keep=$keep, delete=$delete, combine=$combine, format=$ext, subs=$subs, extras=$extras, podcast dir=$podcast" "info"
 
 #------------------------------------------------------------------------------
 # Get all relevant metadata out of the info(.vdr) file, if it exists
@@ -932,6 +1095,8 @@ fi
 [ -e "$input/info$VDRtype" ] && meta=$(cat "$input/info$VDRtype")
 
 TITLE="NO TITLE"
+pod_desc="No Description"
+
 [ "$meta" ] && for line in "$meta";
 do
   #naming
@@ -941,26 +1106,74 @@ do
   # Support filesystems with limited max filename size by truncating just subtitle
   l=$((${#TITLE} + ${#ID[0]}))
   [ $l -ge $filesystem ] && ID[0]=$(echo $ID[0] |cut -c1-$filesystem)...
-  EP=$(echo "$line" |grep "^D" |grep -oP '(?<=Episode:).*' |cut -f1 -d"|")
+  EP=$(echo "$line" |grep "^D" |grep -oP '(?<=Episode: ).*' |cut -f1 -d"|")
+  # EP1 is Schedules Direct/Tribune source data: not fully defined. 
+  # eg. MV001234560000. First 8 numbers appear to be progID. others EP
+  # See Tribune media XTVDSchemaDefinition.pdf. Limited decoding info!
+  # "Uniquedescriptionidentifier necessary to reference movies, shows, episodes, sports from the programs
+  # data. First two digits are alphanumeric and correspond to movies (MV), shows(SH), episodes(EP) and sports(SP).
+  # For shows beginning with EP, the next 8 digits represent the seriesID, with the last 4 digits representing
+  # the episodeid. If episode information is not available, the program will appear as type SH, the next 8 digits
+  # as the series id and the last 4 digits as zeros."
+
+  EP1=$(echo $EP | grep -oP '[A-Z]{2}[0-9]{10,12}')
+  EP2=$(echo $EP | grep -oP '[0-9/ ]{1,3}\.[0-9/ ]{1,3}\.[0-9/ ]{0,3}')   # xmltv, e.g 2 . 9/10 . 0/1
+  EP2=$(echo $EP2 | tr -d ' ')
   # Meta info event date, time and DOW, 3rd field - useful in file listings for offline use
   ID[2]=$(echo "$line" |grep "^E" |cut -f3 -d" " |awk '{print strftime("%F-%a_%H-%M",$1)}')
-
+ 
   #resolution. Just look for HD in station name - a bit simplistic, but only used for file naming
   CHAN=$(echo "$line" |grep "^C" |cut -f3-7 -d" ")
   HD=$(echo "$CHAN" |grep -o 'HD')
   fr=$(echo "$line" |grep "^F"|sed 's/[^0-9]*//g')
   [ $fr ] && framerate=$fr    # when provided
 
-  #Stream metatdata also. Video we don't check - no lang usually associated
-  X201=$(echo "$line" |grep "^X 2 01\|^X 2 02" |cut -f4 -d" ")
+  #Stream metatdata also. 
+  #Video - useful to know if recording contains any. ffmpeg test rather than use actual values
+  X1=$(echo "$line" |grep "^X [1\|5\|9]" |cut -f4 -d" ")
+
+  #Audio
+  X201=$(echo "$line" |grep "^X 2 [01\|02]" |cut -f4 -d" ")
   X203=$(echo "$line" |grep "^X 2 03" |cut -f4 -d" ")
   X204=$(echo "$line" |grep "^X 2 04" |cut -f4 -d" ")
   X205=$(echo "$line" |grep "^X 2 05" |cut -f4 -d" ")
-  X240=$(echo "$line"|grep "^X 2 40" |cut -f4 -d" ")
-  X31=$(echo "$line" |grep "^X 3 1" |cut -f4 -d" ")
+  X240=$(echo "$line"|grep "^X 2 40" |cut -f4 -d" ")  # AD
+  X31=$(echo "$line" |grep "^X 3 1" |cut -f4 -d" ")   # teletext/subs
 
-  [ !$VDRtype ] && lifetime=$(echo "$line" |grep "^L" |sed 's/[^0-9]*//g')
+  #Podcast tags
+  #There may be a year field in the description. Or use year of recording, assuming not a repeat!
+  pod_date=$(echo "$line" |grep "^D" |grep -oP '(?<=Date: ).*' |cut -f1 -d"|" |grep -oP '[0-9]{4}')
+  pod_year=$(echo "$line" |grep "^E" |cut -f3 -d" " |awk '{print strftime("%Y",$1)}')
+  pod_week=$(echo "$line" |grep "^E" |cut -f3 -d" " |awk '{print strftime("%V",$1)}')
+  pod_genrenum=$(echo "$line" |grep "^G" |cut -f2 -d" ")
+  pod_presenters=$(echo "$line" |grep "^D" |grep -oP '(?<=Presenters: ).*' |cut -f1 -d"|")   # rarely
+  pod_actors=$(echo "$line" |grep "^D" |grep -oP '(?<=Actors: ).*' |cut -f1 -d"|")   # often
+  pod_desc=$(echo "$line" |grep -oP '(?<=^D ).*' |cut -f1 -d"|")  # almost always, sadly usu. freeform!
+  
+  lifetime=$(echo "$line" |grep "^L" |sed 's/[^0-9]*//g')
 done
+
+if [ $VDRtype ]; then
+  ROOTDIR=$(echo $(dirname "$input"))
+  BASEDIR=$(echo $(basename "$input"))
+  priority=$(echo $BASEDIR | cut -f4 -d".")
+  lifetime=$(echo $BASEDIR | cut -f5 -d".")   # overwrite it
+fi
+
+# Manage short lifetime recordings
+if [ $lifetime -lt $life ]; then
+  # TV recordings skipped if we are "keeping" them - save time & energy
+  [ "$X1" ] && [ $keep -eq 1 ] && logit "Skipping '$input', recording lifetime is $lifetime" "info" && quit 2
+elif [ $lifetime -gt $life ]; then
+  # Only make (radio) podcasts if they are short life, else normal
+  if [ ! "$X1" ] && [ "$podcast" ]; then
+    podcast=""
+    outputdir=$(pwd)
+    logit "Not making podcast of '$input', recording lifetime is $lifetime : transcoding normally" "warn"
+  fi
+fi
+
+# Postprocess the various tags
 
 # There are often multiples, take the first - naff, I know
 IFS=' ' read -ra X201 <<<"$X201"
@@ -976,39 +1189,72 @@ IFS=' ' read -ra X240 <<<"$X240"
 IFS=' ' read -ra X31 <<<"$X31" 
 [ $X31 ] && Slang=$X31
 
-[ "$EP" ] && ID[1]=EPISODE$EP
+# override rec date by meta if we have it
+[ "$pod_date" ] && pod_year=$pod_date 
+# Other meta fallbacks
+[ ! "$pod_presenters" ] && [ "$pod_actors" ] && pod_presenters=$pod_actors
+[ ! "$pod_presenters" ] && [ "$CHAN" ] && pod_presenters=$CHAN
 
-for token in ${ID[@]}
-do
-  [ "$token" ] && TITLE=$(echo "$TITLE-$token")
-done
-
-if [ $VDRtype ]; then
-  ROOTDIR=$(echo $(dirname "$input"))
-  BASEDIR=$(echo $(basename "$input"))
-  priority=$(echo $BASEDIR | cut -f4 -d".")
-  lifetime=$(echo $BASEDIR | cut -f5 -d".")
+#prioritise EP2, remember xmltv numbering is zero based
+if [ "$EP2" ]; then
+  ID[1]="EP:$EP2"  # Note for historical consistency this is the RAW unprocessed value
+  pod_episode_id=$EP2   # This tag will be complete - gives parts + total ep count if required
+  pod_album=$(echo $EP2 | grep -oP '^[0-9]{1,3}')
+  pod_album="$(($pod_album + 1)) ($pod_year)"
+  pod_episode=$(echo $EP2 | cut -f2 -d'.' | grep -oP '^[0-9]{1,3}')    # ignore last parts element: very rarely seen
+  pod_episode=$(($pod_episode + 1))
+elif [ "$EP1" ]; then
+  ID[1]="EP:$EP1"
+  pod_episode_id=$EP1
+  pod_album=$pod_year
+  pod_episode=$pod_week    # ISO 8601 week no. - numeric.
+else
+  pod_album=$pod_year
+  pod_episode=$pod_week
 fi
 
-# Short lifetime files skipped if we are "keeping" them - save time & energy
-[ $lifetime -lt $life ] && [ $keep -eq 1 ] && logit "Skipping $input, recording lifetime is $lifetime" "info" && quit 2
+# The description may contain the "Category" (i.e.genre), but on radio often doesn't: so do it the hard way!
+# Find *first* match for the Genre as text (VDR info provides Genrenum as a number)
+pod_genre=$pod_genrenum     # a default fallback - why not ? (e.g. genre file missing) 
+if [ "$podcast" ] && [ "$genrefile" ] && [ $pod_genrenum ]; then
+  while read -r line; do
+    [ $(echo "$line" | grep '^ *#') ] && continue  #skip comments
+    [ $(echo "$line" | grep ":$pod_genrenum") ] && pod_genre=$(echo "$line" | cut -f1 -d":") && break
+  done < "$genrefile"
+fi
+
+LONGTITLE=$TITLE
+for token in ${ID[@]}
+do
+  [ "$token" ] && LONGTITLE=$(echo "$LONGTITLE-$token")
+done
 
 # Option to combine input files:
-# By default we convert separately, in case a broken file fails. Combining might be less reliable,
+# By default we transcode files separately, in case a broken file fails. Combining might be less reliable,
 # esp. with lots of interruptions, ffmpeg duration estimations can often get messed up.
-# But results are seamless when combined - recommended with good, reliable recordings
-if [ $combine -eq 1 ] && [ $vdrfiles -gt 1 -o $tsfiles -gt 1 ] && [ $redo -ne 1 ]; then
+# But results are completely seamless when combined - so it's recommended when recordings are reliable
+if [ $combine -eq 1 ] && [ $vdrfiles -gt 1 -o $tsfiles -gt 1 ] && [ $redo -eq 0 ]; then
+  # Avoid concatting Gb of HD files if not req'd - do a quick check of first file. May map raw .vdr files!
+  file1=$(echo $FILES |cut -f1 -d" ")
+  map $file1 0
+  ret=$?
+  [ $ret -gt 0 ] && quit $ret       # if same or higher vcodec
+  # this might not find video (short files) - it will fall through
+  map=""
   cat $FILES > "$input/recording.orig"
   if [ $? -eq 0 ]; then
     FILES="$input/recording.orig"
   else
-    logit "Failed to combine input files for $input, trying individually" && rm -f "$input/recording.orig"
+    logit "Failed to combine input files for '$input', trying individually" && rm -f "$input/recording.orig"
   fi
 fi
 
 #------------------------------------------------------------------------------
 # Conversion
 #------------------------------------------------------------------------------
+# We can be presented with recording.orig or a list of files in FILES. 
+# recording.orig may not be large enough either - still size test it
+
 for f in $FILES
 do
   size=$(stat -c %s "$f" )
@@ -1017,22 +1263,34 @@ do
     fileno=$(($fileno + 1))
     echo; Repeat - 120
     logit "Processing \"$f\" file $fileno, size $(($size/$meg))M..." "info"
-    OUTFILE=$(echo "$TITLE-file-$fileno.ts" | tr -s "\/:?*<>\"| " '-')
-    [ $keep -eq 1 ] && OUTFILE="$input/$OUTFILE" || OUTFILE="$(pwd)/$OUTFILE"   # pwd if not keeping
+    OUTFILE="$input/intermediate-file-$fileno.ts"
     TMPFILES=$(echo "$TMPFILES \"$OUTFILE"\")
     MERGEFILES=$(echo "$MERGEFILES$OUTFILE|")
     if [ $redo -eq 0 ]; then
       transcode "$f" "$OUTFILE"
       return=$?
       if [ $debug -eq 0 ] && [ $combine -eq 1 ] && [ -e "$input/recording.orig" ]; then
-        rm -f "$input/recording.orig" || logit "could not remove $input/recording.orig" "err"
+        rm -f "$input/recording.orig" || logit "could not remove '$input/recording.orig'" "err"
       fi
       [ $return -gt 0 ] && quit $return
     fi
   else
-    echo;logit "Skipping $f - too small ($(($size/$meg))M). Try combining input files with -c option" "err"
-    # !!!continue but no longer delete (so don't lose anything if it goes wrong)
-    [ $keep -eq 1 ] && [ $delete -eq 1 ] && delete=0 && logit "No longer deleting files for $input"
+    # combined or not, it's too small
+    echo
+    if [ $combine -eq 1 ]; then
+      if [ $vdrfiles -eq 1 -o $tsfiles -eq 1 ] && [ $delete -eq 1 ]; then
+        # Special logic here to delete first file in case it's an aborted VPS start. 
+        # The combine flag is really forcing a special cleanup mode here
+        logit "Deleting short initial recording file: $f, too small ($(($size/$meg))M)" "err"
+        rm -f "$f" || logit "could not remove $f" "err"
+        quit 1
+      fi
+      logit "Skipping $f - combined size too small ($(($size/$meg))M)" "err"
+      quit 1
+    fi
+    logit "Skipping $f - too small ($(($size/$meg))M). Try combining input files with -c option" "err"
+    # !!!continue but no longer delete (so don't lose anything if it all goes wrong)
+    [ $keep -eq 1 ] && [ $delete -eq 1 ] && delete=0 && logit "No longer deleting files for '$input'"
   fi
 done
 
@@ -1045,7 +1303,8 @@ done
 # (audio and subs first -> video, "best" audio, other audio, subs)
 # NOTE this assumes map of each transcoded file is the same, otherwise there will be trouble.
 
-map $OUTFILE 0 1
+map=""
+map $OUTFILE 0 1  # usu. a temp file
 
 # SD or HD?. Enhanced EPG would tell us - but not always present
 if [ $F_VIDEO ]; then
@@ -1058,24 +1317,26 @@ fi
 #------------------------------------------------------------------------------
 # Merge transcoded files
 #------------------------------------------------------------------------------
-# Now merge them, avoid faffing about with separate files
-# Concat supports some file format (container) conversions and flters, but not stream conversions
+# Now merge and name them where required, avoid faffing about with separate files
+# Concat supports some file format (container) conversions and filters, but not stream conversions
 # Some filters are auto-enabled depending on output format, e.g. m4a invokes aac_adtstoasc, so I no longer need to!
 # see https://www.ffmpeg.org/ffmpeg-bitstream-filters.html
 
-NAME=$(echo "$TITLE-$DEF" | tr -s "\"" '-')
-BASENAME=$(echo "$TITLE" | tr -s "\/:?*<>\"| " '-')
+# Extensive recording metadata is also inserted here
 
-if [ $keep -eq 1 ]; then
-  OUT[0]="$input/$BASENAME.ts"
+BASENAME=$(echo "$LONGTITLE" | tr -s "\/:?*<>\"|" '-')   # filenames with rec date - no special chars (prev. no spaces too)
+TITLE=$(echo "$TITLE" | tr -s "\/:?*<>\"|" '-')          # directories - no special chars
+
+if [ $keep -eq 1 ]; then   
+  OUT[0]="$input/$BASENAME.ts"    # intermediate file before rename
 else
   # On a "redo" can't test for type, so only use basename when ftp'ing
-  [ $ftp -eq 0 -a $redo -eq 0 ] && BASENAME="$BASENAME-$DEF"
+  [ $ftp -eq 0 -a $redo -eq 0 -a ! "$podcast" ] && BASENAME="$BASENAME-$DEF"
   if [ $debug -eq 1 ] && [ $ext == "ts" ]; then     # i.e. default, no ext spec'd
     # loop through and create desired formats for testing (allow multiple versions to exist by naming)
     if [ $DEF == "AUDIO" ]; then
       BASENAME="$BASENAME-$acodec"
-      [ $(echo $acodec |grep -i "mp3") ] && formats=(mp3 mkv ts) || formats=(aac m4a mkv mp4 ts)
+      [ $(echo $acodec |grep -i "libmp3") ] && formats=(mp3 mkv ts) || formats=(m4a mkv mp4 ts)
     else
       BASENAME="$BASENAME-H$vcodec-$acodec"
       # Will fail on mp4 & avi if you concat with them as formats don't support subs
@@ -1084,53 +1345,78 @@ else
   else
     formats=($ext)
   fi
-  # default to current directory and convert marks to EDL files if present
-  [ -f "$input/marks$VDRtype" ] && edl "$input/marks$VDRtype" "$(pwd)/$BASENAME"
+  if [ "$podcast" ]; then
+    # use the Title to help organise podcast files (fallback if cannot)
+    mkdir -p -- "$outputdir/$TITLE"
+    if [ $? -ne 0 ]; then
+      logit "Cannot create directory $outputdir/$TITLE, falling back to $outputdir" "warn"
+    else
+      outputdir="$outputdir/$TITLE"
+    fi      
+  fi 
   for ((i=0; i<${#formats[*]}; i++));
   do
-    OUT[i]="$(pwd)/$BASENAME.${formats[i]}" 
+    OUT[i]="$outputdir/$BASENAME.${formats[i]}"
   done
+  # if marks present, convert to an EDL file
+  [ -f "$input/marks$VDRtype" -a $redo -eq 0 ] && edl "$input/marks$VDRtype" "$outputdir/$BASENAME"
 fi
 
-if [[ $redo -eq 0 && $MERGEFILES ]]; then
+if [ $MERGEFILES ]; then
   result=0; results=0
   # Do merge(s)
   for outfile in ${OUT[@]}
   do
-    #ts's can be concatenated directly. Again probe deeply else can fail, esp on AD/subs. 
-    # NOTE concat file better than concat stream: lipsync issues
-    # -copyts??? Without it ffmpeg reports duration correctly. Possibly not with copyts
-    cmd="$ffmpeg -i concat:"\"$MERGEFILES"\" -metadata title="\"$NAME"\" -metadata service_provider="\"$CHAN"\" -c copy $concatflags $map "\"$outfile"\" 2>> $LOGFILE"
-    echo; Repeat - 120
-    logit "Creating output with $cmd" "info"
-    sh -c $cmd
-    result=$?
-    [ $result -eq 0 ] && msg="OK" || msg="Fail"
-    outputsize=$(stat -c %s "$outfile")   # 1 file
-    stats="$(($inputsize/$meg))M to $(($outputsize/$meg))M ($(echo $outputsize $inputsize | awk '{ printf "%.1f", 100 * $1 / $2 }')%)"
-    [ $keep -eq 0 ] && echo && logit "Created $outfile ($stats), $msg" "info"
-    results=$(($results + $result))
+    if [ $redo -eq 0 ]; then
+      # add tag parameters for all recordings now (not just podcasts)
+      # A number of these are gross approximations as metadata is poor - e.g. Album artist
+      # language a bit approximate: individual streams have language tags, but not always shown
+      # Title has description concatenated so it shows in LMS scrolling title display - as some podcasts
+      # MP4 likes "date" not "year" (ffmpeg docs wrong atm)
+      # ts has no metadata, ffmpeg silently drops
+      metadata=" \
+      "$(create_meta "service_provider" $CHAN)"\
+      "$(create_meta "title" "$LONGTITLE: $pod_desc")"\
+      "$(create_meta "year" $pod_year)"\
+      "$(create_meta "date" $pod_year)"\
+      "$(create_meta "album" $pod_album)"\
+      "$(create_meta "track" $pod_episode)"\
+      "$(create_meta "author" $pod_presenters)"\
+      "$(create_meta "artist" $pod_presenters)"\
+      "$(create_meta "album_artist" $TITLE)"\
+      "$(create_meta "genre" $pod_genre)"\
+      "$(create_meta "episode_id" $pod_episode_id)"\
+      "$(create_meta "show" $TITLE)"\
+      "$(create_meta "description" $pod_desc)"\
+      "$(create_meta "comment" $pod_desc)"\
+      "$(create_meta "language" $Alangstereo)"\
+      "$(create_meta "publisher" $CHAN)"\
+      -metadata encoder=\"vdr-convert\"\
+      -metadata encoded_by=\"vdr-convert\"\
+      "
+
+      #ts's can be concatenated directly. Again probe deeply else can fail, esp. on AD/subs.
+      # NOTE concat file better than concat stream: lipsync issues
+      # -copyts??? Without it ffmpeg reports duration correctly. Possibly not with copyts
+      cmd="$ffmpeg -i concat:"\"$MERGEFILES"\" $metadata -c copy $concatflags $map "\"$outfile"\" 2>> $LOGFILE"
+      echo; Repeat - 120
+      logit "Creating output with $cmd" "info"
+      sh -c $cmd
+      result=$?
+      [ $result -eq 0 ] && msg="OK" || msg="Fail"
+      outputsize=$(stat -c %s "$outfile") || outputsize=1   # 1 file, safety if null
+      stats="$(($inputsize/$meg))M to $(($outputsize/$meg))M ($(echo $outputsize $inputsize | awk '{ printf "%.1f", 100 * $1 / $2 }')%)"
+      [ $keep -eq 0 ] && echo && logit "Created $outfile ($stats), $msg" "info"
+      results=$(($results + $result))
+    else
+      results=$redo
+    fi
   done
   if [ $results -eq 0 ]; then
-    # Extensive QA testing when keeping
+    check_duration       # basic QA
+    [ $? -ne 0 ] && cleanup && quit 1
+    # Extensive QA testing only when keeping
     if [ $keep -eq 1 ]; then
-      # check for duration match within 30s (empirical magic number)
-      progduration $outfile
-      if [ $debug -eq 0 ] && [ $(($duration + 30)) -lt $program_duration ]; then
-        logit "Possible fail: $outfile, size $(($outputsize/$meg))M, is only $duration sec long, original $(($inputsize/$meg))M, with length detected as $program_duration sec" "err"
-        cleanup
-        quit 1
-      fi
-      # check for silly compression ratio, or larger, heaven forbid!)
-      [ $vcodec -eq 262 ] && mult=3     # MPEG original
-      [ $vcodec -eq 264 ] && mult=8     # x264: 3/8 of original
-      [ $vcodec -eq 265 ] && mult=12    # x265 3/12 of original
-      if [ $debug -eq 0 ] && [ $(($inputsize * 3)) -gt $(($outputsize * $mult)) -o $outputsize -gt $inputsize -a $maintain -eq 0 ]; then
-        logit "Possible fail: Suspect size of $outfile, (new $(($outputsize/$meg))M vs. original $(($inputsize/$meg))M)" "err"
-        # keep converted outfile, actually it may be OK
-        cleanup
-        quit 1
-      fi
       # Save video, force a VDR reindex and check it was really successful before deleting original files
       # VDR2 will only recognise .ts's in the NEW format of directory name
       if [ $VDRtype ]; then
@@ -1158,11 +1444,11 @@ if [[ $redo -eq 0 && $MERGEFILES ]]; then
         SAVE="$input/0*.ts"
         for f in $SAVE
         do
-          mv -f "$f" "$f.orig" || logit "could not save original file(s)" "err"
+          mv -n "$f" "$f.orig" || logit "could not save original file(s)" "err"   # don't overwrite!
         done
-        mv -f "$input/index" "$input/index.orig" || logit "could not save index" "warn"
+        mv -n "$input/index" "$input/index.orig" || logit "could not save index" "warn"
       fi
-      # Only a single ts after transcoding
+      # Only a single ts after transcoding, (VDR will only check the file having replaced the originals!)
       mv -f "$outfile" "$RECDIR/00001.ts" || logit "could not move .ts" "err"
       # Neatness, but importantly a check that VDR will be reasonably happy to play the file - otherwise bail
       sh -c "vdr --genindex "\"$RECDIR"\""
@@ -1170,7 +1456,7 @@ if [[ $redo -eq 0 && $MERGEFILES ]]; then
         echo "# Transcoded from $stats by $0 on $(date)" >> "$RECDIR/info"
         [ "$F_VIDEO" ] && echo "# Video parameters: $reportedvideo" >> "$RECDIR/info"
         [ "$F_AUDIO" ] && echo "# Audio parameters: $reportedaudio" >> "$RECDIR/info"
-        logit "Created/replaced .ts and indexed $NAME ($stats)" "info"
+        logit "Created/replaced .ts and indexed $BASENAME ($stats)" "info"
         if [ $delete -eq 1 ]; then
           if [ $VDRtype ]; then
             # old VDR 1.x directory & content no use now
@@ -1182,11 +1468,11 @@ if [[ $redo -eq 0 && $MERGEFILES ]]; then
               rm -f "$input"/*.orig || logit "could not remove original file(s)" "err"
             fi
           fi
-          logit "Original files for $NAME deleted" "info"
+          logit "Original files for $BASENAME deleted" "info"
         fi
       else
         # Failed, so restore
-        logit "Conversion / indexing for $NAME failed" "err"
+        logit "Conversion / indexing for $BASENAME failed" "err"
         if [ $VDRtype ]; then
           if [ $debug -eq 0 ]; then
             rm -rf "$RECDIR" || logit "could not delete temp conversion files"    # borked new directory
@@ -1201,17 +1487,30 @@ if [[ $redo -eq 0 && $MERGEFILES ]]; then
         fi
       fi
     #end keep mode
+    else
+      # We've done reasonable, but not exhaustive checks - delete podcast originals if requested
+      if [ "$podcast" ] && [ $debug -eq 0 ]; then
+        if [ $delete -eq 1 ]; then
+          rm -rf "$input" || logit "could not remove original files" "err"
+          logit "Original files for $BASENAME deleted" "info"
+        fi  
+		# Post conversion command(s) as required
+		[ $podcastcmd ] && sh -c "$podcastcmd" &
+      fi
     fi
-  else
-    logit "Fail: Converted files for $NAME did not merge correctly" "err"
+  else 
+    [ $redo -eq 0 ] &&  logit "Fail: Converted files for $BASENAME did not merge correctly" "err"
   fi
   cleanup
 fi
 
-# FTP upload if required
-[ $ftp -eq 1 -o $redo -eq 1 -a $debug -eq 0 ] && upload "$outfile"
+# FTP upload or re-upload if required
+if [ $ftp -eq 1 -o $redo -eq 1 ]; then
+  [ -e "$outputdir/$BASENAME.edl" ] && upload "$outputdir/$BASENAME.edl"
+  [ -e "$outfile" ] && upload "$outfile"
+fi
 
 # remove lockfile
 quit 0
 
-# --------- $Id: vdr-convert,v 2.1 2017/04/09 12:55:43 richard Exp $ ---------- END
+# --------- $Id: vdr-convert,v 2.2 2018/09/12 12:10:10 richard Exp $ ---------- END

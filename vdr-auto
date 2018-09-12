@@ -9,8 +9,8 @@
 #------------------------------------------------------------------------------
 #
 # $Log: vdr-auto,v $
-# Revision 1.1  2016/09/01 12:35:23  richard
-# Initial import
+# Revision 1.2  2018/09/12 13:20:05  richard
+# Updated for vdr-convert V2.2 with --podcast option
 #
 #------------------------------------------------------------------------------
 
@@ -19,14 +19,15 @@ case "$1" in
             echo "Before recording $2"
             ;;
      started)
+            # some recent library change causes noad to barf with "started" (which was never a supported switch!)
             echo "Started recording $2"
-			/usr/local/bin/noad -s /etc/vdr/noadstat.csv -o -c $1 $2
+            /usr/local/bin/noad -s /etc/vdr/noadstat.csv -o -c before $2
             ;;
      after)
             echo "After recording $2"
             #vdr forks this script, noad forks itself, vdr-convert doesn't
             /usr/local/bin/noad -s /etc/vdr/noadstat.csv -o -c  $1 $2
-            /usr/local/bin/vdr-convert -k -d -i $2 &
+            /usr/local/bin/vdr-convert -a libfdk_aac -k -c -d --podcast /mnt/lvm/Radio -g /etc/vdr/xmltv2vdr/genres.conf -i $2 &
             ;;
      edited)
             echo "Edited recording $2"
@@ -39,4 +40,4 @@ case "$1" in
             ;;
 esac
 
-# --------- $Id: vdr-auto,v 1.1 2016/09/01 12:35:23 richard Exp $ ---------- END
+# --------- $Id: vdr-auto,v 1.2 2018/09/12 13:20:05 richard Exp $ ---------- END

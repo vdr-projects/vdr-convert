@@ -1,12 +1,16 @@
  
-VDR-convert Version 2
-=====================
-vdr-convert is a set of tools to accurately transcode VDR1.x and VDR2.x TV recordings, including all valid streams - video, audio (including AC3/DTS 5.1), Audio Description (AD), and DVB subtitles - into a more compressed and accessible format, while maintaining perceived quality with good compatibility. H264 and AAC are the default codecs for the main streams, but H265 is available from V2 onwards, together with most common file formats in single-use/batch modes. Standard Def (SD) recordings are reduced to anywhere from 35% - 90% of original size depending on content and compression settings. The average reduction is around 35% of original size over a range of SD recording types. The better/less noisy the content, the better the compression.
+VDR-convert Version 2.2
+=======================
+vdr-convert is a set of tools to accurately transcode VDR1.x and VDR2.x TV recordings, including all valid streams - video, audio (including AC3/DTS 5.1), Audio Description (AD), and DVB subtitles - into a more compressed and accessible format, while maintaining perceived quality with good compatibility. H264 and AAC are the default codecs for the main streams, but H265 is available from V2 onwards
 
-The user can leave the transcoded files in-place for use by VDR or use them with external players such as Kodi, MPC-HC, or VLC
+The user can leave the transcoded files in-place for use by VDR or use them with external players such as Kodi, MPC-HC, or VLC. 
 
 Refer to the WIKI here for full usage instructions
 https://projects.vdr-developer.org/projects/vdr-convert/wiki
+
+A new podcast mode was addd in V2.2:
+https://projects.vdr-developer.org/projects/vdr-convert/wiki/Podcast-mode
+
 
 Software required
 =================
@@ -41,7 +45,7 @@ set default langauages if you are missing VDR "info" files.
 
 "filesystem", default is 190. This is the number of characters that the filesystem can handle, plus ~60 for date, time, epiosde number. Most filesystems limit the total to 255.
 
-"email" address if you want to be emailed about significant conversion failures
+"email" address if you want to be emailed about significant conversion failures (those tagged "error")
 
 Default conversion parameters
 =============================
@@ -49,7 +53,7 @@ Command line options may modify several of these, see
 https://projects.vdr-developer.org/projects/vdr-convert/wiki/Options)
 
 Note The H264/265 presets are chosen to be optimal at the time of writing based on testing and web reviews
-Optimal H265 presets may change as H265 develops
+Optimal H265 presets have changed as H265 develops
 
 "qualityx265" is an adder to the familiar x264 CRF values to align them with those used in x265.
 So you use the familiar x264 CRF's with the -q option to acheive approx the same quality with x265
@@ -59,7 +63,14 @@ See https://projects.vdr-developer.org/projects/vdr-convert/wiki/Howto#H265
 
 "acodec" set to libfdk_aac if you built and linked your ffmpeg with the non-free Fraunhofer AAC library 
 
-"ext" is the default output file format/extension. ts is always used for kept files, others are supported for single-use
+"ext" is the default output file format/extension. 
+ts is always used for kept files, others are supported for single-use
+
+"podcastaudioprofile" is the codec config string for audio podcasts when the --podcast option is used
+More description in the script itself - there are usable strings for default HE-AAC v2, MP3 and Opus
+
+"podcastcmd" defines podcast post processing commands, the default is for a local Squuezeserver (LMS)
+
 See https://projects.vdr-developer.org/projects/vdr-convert/wiki/Options
 
 ----
@@ -86,8 +97,7 @@ Patching
 ========
 FFMPEG
 ------
-You should consider patching ffmpeg if you have "broken" recordings - e.g where there was reception interference during recording. Stock ffmpeg is intolerant of subtitles streams with any DTS timestamp errors.  Some broadcasters regularly 
-transmit programmes with DTS problems, you may there need to patch.
+You should consider patching ffmpeg if you have "broken" recordings - e.g where there was reception interference during recording. Stock ffmpeg is intolerant of subtitles streams with any DTS timestamp errors.  Some broadcasters regularly transmit programmes with DTS problems, you may therefore need to patch.
 
 To do this:
 Get an up-to-date copy of ffmpeg, e.g.
@@ -107,7 +117,6 @@ The patches are in the VDR patches subdirectory
 Copy them to the VDR source directory, and patch as ffmpeg above
 Rebuild VDR as usual.
 
-
 Other utilities
 ===============
 You are more than likely wanting to convert a whole selection in a recordings together.
@@ -116,9 +125,9 @@ The wiki provides details of how to use this, make sure it is copied somewhere i
 
 If you want to run vdr-convert automatically after each recording, the supplied script "vdr-auto" can be used. The wiki describes it's use. The version supplied is what the author uses daily, and includes a call to the venerable "noad" utility as well, to mark commercial breaks.
 
-Noad completes very much more quickly than vdr-convert because the ffmpeg libraries are doing much less work than libx264.  It will therefore complete long before the recording file is replaced by vdr-convert, avoiding conflicts.  
-noad or similar utilities can of course be run on the converted files too, and in test noad produces the same output (within a second). For this reason vdr-convert does not re-run noad on converted files, just copies any marks.vdr file over (if required for VDR1.x recordings).
+Noad completes very much more quickly than vdr-convert because the ffmpeg libraries are doing much less work than libx264.  It will therefore complete long before the recording file is replaced by vdr-convert, avoiding conflicts.  noad or similar utilities can of course be run on the converted files too, and in test noad produces the same output (within a second). For this reason vdr-convert does not re-run noad on converted files, just copies any marks.vdr file over (if required for VDR1.x recordings).
 
 RF V1 August 2016
 V1 Updated Dec 2016
 V2 Updated March 2017
+V2.2 Updated Sept 2018
