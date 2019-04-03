@@ -1,5 +1,5 @@
- 
-VDR-convert Version 2.2
+
+VDR-convert Version 2.3
 =======================
 vdr-convert is a set of tools to accurately transcode VDR1.x and VDR2.x TV recordings, including all valid streams - video, audio (including AC3/DTS 5.1), Audio Description (AD), and DVB subtitles - into a more compressed and accessible format, while maintaining perceived quality with good compatibility. H264 and AAC are the default codecs for the main streams, but H265 is available from V2 onwards
 

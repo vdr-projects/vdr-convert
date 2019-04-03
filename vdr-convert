@@ -72,6 +72,13 @@
 #------------------------------------------------------------------------------
 #
 # $Log: vdr-convert,v $
+# Revision 2.3  2019/04/03 13:02:04  richard
+# Fixed support for mono podcasts using HE-AAC
+# Support latest ffmpeg with more relevant/shorter service name+provider metadata
+# AAC streams: Silently use Fraunhofer (libfdk) if available in ffmpeg unless set with -a
+# Improved error reporting tolerance x264/5
+# Improved error reporting tolerance (subtitle stream) with foreign language (hard-subtitled) programmes
+#
 # Revision 2.2  2018/09/12 12:10:10  richard
 # Added --podcast option: podcasts stored in subdirectories, by Title
 # Podcast audio codec config: Can use (HE)AAC, MP3 or Opus
@@ -182,6 +189,7 @@ Alangsurround='eng'
 ADlang='eng'
 Slang='eng'
 framerate=25    # 25 (DVB) or 30 for ATSC
+PROVIDER="unknown"
 
 filesystem=190  # limit filename length to 256 allowing ~60 chars for EP, DOW etc
 # Check behaviour on your filesystem with unicode/UTF characters, may need adjustment
@@ -250,7 +258,7 @@ ext='ts'    # default file format extension
 # libsoxr supposed to be higher quality resampler (sounds a bit better, usu. requires custom ffmpeg build)
 # MKV supports slightly better metadata, LMS doesn't recognise by default.
 
-podcastaudioprofile="libfdk_aac -profile:a aac_he_v2 -b:a 48k -af aresample=resampler=soxr -ar 44100"
+podcastaudioprofile="libfdk_aac -profile:a aac_he_v2 -b:a 48k -af aresample=resampler=soxr -ar 44100"  # (V1 is forced for mono)
 # podcastaudioprofile="libmp3lame -b:a 80k -af aresample=resampler=soxr -ar 44100"  # MP3
 # podcastaudioprofile="libopus -b:a 48k"      # Opus - Can't downsample to 44.1
 
@@ -403,48 +411,52 @@ function map() {
 # v. quick functional testing only
 #		F_VIDEO="-c:v libx264 -preset ultrafast -vf scale=112:63"
 #		F_VIDEO="-c:v mpeg2video"
-      # end video
+    # end video
 	fi
-    if [ $maintain -eq 1 ] && [ $(echo $line |grep -i "audio") ]; then
-      mapst="$mapst B:$((10000 - $bitrate)):$stream_id"
-      AUDIO[$stream_id]="-c:a:stream_op copy -metadata:s:a:stream_op language=$Alangstereo"
-      [ $(echo $ext |grep -i "mp3") ] && logit "Warning: audio stream copy may not work with $ext format"
-    # Multichannel audio - just copy to best preserve. Can be AAC 5.1. Always put multichannel ahead of others
-	elif [ $(echo $line |grep -i "audio" |grep -i "ac3\|5.1") ]; then
-      mapst="$mapst C:$((10000 - $bitrate)):$stream_id"
-      AUDIO[$stream_id]="-c:a:stream_op copy -metadata:s:a:stream_op language=$Alangsurround"
-      [ $(echo $ext |grep -i "mp3") ] && logit "Fail: multichannel audio will not work with $ext format" "err" && quit 1
-	elif [ $(echo $line |grep -i "audio" |grep -i "aac") ]; then
-      # We don't normally use Opus/HE-AAC as barely better at bitrates we're interested for AV transcodes. Opus is really only 48k
-      # AAC (e.g from HD recording) best left as is. We can't always detect AAC 5.1 (e.g starts in continuity in stereo), sometimes not the bitrate
-      # Doesn't matter how long you probe for, may still miss 5.1 AAC. Only safe way is copy
-
-      # lower the risk - just copy the stream
-      if [ $keep -eq 1 ]; then
-        [ ! $(echo $acodec |grep -i "aac") ] && logit "Fail: unsupported request for non-aac codec with aac source, exiting" "err" && quit 1
-        mapst="$mapst D:$((10000 - $bitrate)):$stream_id"
+	if [ $(echo $line |grep -i "audio") ]; then
+      if [ $maintain -eq 1 ]; then
+        mapst="$mapst B:$((10000 - $bitrate)):$stream_id"
         AUDIO[$stream_id]="-c:a:stream_op copy -metadata:s:a:stream_op language=$Alangstereo"
-      else
-        # Take the risk for single-use, still an outside chance it's multichannel and could fail or end up as stereo
-        audio_bitrate $bitrate $3
-        mapst="$mapst E:$((10000 - $outputbitrate)):$stream_id"
-        AUDIO[$stream_id]="-c:a:stream_op $acodec -b:a:stream_op $outputbitrate"k" -metadata:s:a:stream_op language=$Alangstereo"
-      fi
-	else
-      # MP2 usually, sometimes mp3. ffmpeg sometimes says "2 channels". 
-      # AD stream can actually be stereo, esp in HD, or "0 channels" - a null stream, which we drop
-      if [ $(echo $line |grep -i "audio" |grep -i "stereo\|2 channels") ]; then
+        [ $(echo $ext |grep -i "mp3") ] && logit "Warning: audio stream copy may not work with $ext format"
+      # Multichannel audio - just copy to best preserve. Can be AAC 5.1. Always put multichannel ahead of others
+      elif [ $(echo $line |grep -i "ac3\|5.1") ]; then
+        mapst="$mapst C:$((10000 - $bitrate)):$stream_id"
+        AUDIO[$stream_id]="-c:a:stream_op copy -metadata:s:a:stream_op language=$Alangsurround"
+        [ $(echo $ext |grep -i "mp3") ] && logit "Fail: multichannel audio will not work with $ext format" "err" && quit 1
+      elif [ $(echo $line |grep -i "aac") ]; then
+        # We don't normally use Opus/HE-AAC as barely better at bitrates we're interested for AV transcodes. Opus is really only 48k
+        # AAC (e.g from HD recording) best left as is. We can't always detect AAC 5.1 (e.g starts in continuity in stereo), sometimes not the bitrate
+        # Doesn't matter how long you probe for, may still miss 5.1 AAC. Only safe way is copy.
+        # lower the risk - just copy the stream
+        if [ $keep -eq 1 ]; then
+          [ ! $(echo $acodec |grep -i "aac\|copy") ] && logit "Fail: unsupported request for non-aac codec with aac source, exiting" "err" && quit 1
+          mapst="$mapst D:$((10000 - $bitrate)):$stream_id"
+          AUDIO[$stream_id]="-c:a:stream_op copy -metadata:s:a:stream_op language=$Alangstereo"
+        else
+          # Take the risk for single-use, still a significant chance it's multichannel and could fail or end up as stereo
+          # (In this case use option "-a copy" to force copy the stream)
+          audio_bitrate $bitrate $3
+          mapst="$mapst E:$((10000 - $outputbitrate)):$stream_id"
+          AUDIO[$stream_id]="-c:a:stream_op $acodec -b:a:stream_op $outputbitrate"k" -metadata:s:a:stream_op language=$Alangstereo"
+        fi
+      elif [ $(echo $line |grep -i "stereo\|2 channels") ]; then
+        # MP2 usually, sometimes mp3. ffmpeg sometimes says "2 channels". 
+        # AD stream can actually be stereo, esp in HD, or "0 channels" - a null stream, which we drop
         audio_bitrate $bitrate $3
         mapst="$mapst G:$((10000 - $outputbitrate)):$stream_id"
         AUDIO[$stream_id]="-c:a:stream_op $acodec -b:a:stream_op $outputbitrate"k" -metadata:s:a:stream_op language=$Alangstereo"
-      elif [ $(echo $line |grep -i "audio" |grep -i "mono") ]; then
+      elif [ $(echo $line |grep -i "mono\|1 channel") ]; then
         # Likely the AD stream, at low bitrate. 
         # !!!AAC good at low bitrates. But sparse audio gives Kodi/VLC etc trouble, as does MP3 - so copy MP2: 0.5% hit approx!
         mapst="$mapst J:$((10000 - $bitrate)):$stream_id"
         AUDIO[$stream_id]="-c:a:stream_op copy -metadata:s:a:stream_op language=$ADlang"
       fi
-      # end audio
-	fi
+    
+      # NOTE that HE-AAC V2 cannot (currently) handle mono! As podcast only applies to single stream recordings, this is safe
+      [ $(echo $line |grep -i "mono\|1 channel") ] && podcastaudioprofile=$(echo $podcastaudioprofile |sed -e "s/aac_he_v2/aac_he/")
+      
+    # end audio
+    fi
 
     # Skip any dvd_sub misidentified in old VDR recordings - e.g. if .vdr files passed unprocessed
     # Can be multiple streams.
@@ -499,6 +511,7 @@ function map() {
           [ $(echo $podcastaudioprofile | grep 'libmp3') ] && ext="mp3" 
           [ $(echo $podcastaudioprofile | grep 'libopus') ] && ext="opus"
         fi
+        #rewrite the audio mapping found above for podcasts
         F_AUDIO=$(echo $F_AUDIO | sed -e "s/\(-c:a:0\).*\(-metadata\)/-c:a:0 $podcastaudioprofile -metadata/")
         concatflags="-movflags +faststart" 	    # help any streaming
         keep=0      # and we not keeping it: VDR may not support HE-AAC V2
@@ -704,7 +717,9 @@ function transcode() {
               echo "Empty subtitles stream for $main, discarding"
             else
               # a few subs means properly suspect
-              delete=0 && logit "Warning: not deleting originals for $main due to suspect subtitle stream size - please check" "err"
+#              delete=0 && logit "Warning: not deleting originals for $main due to suspect subtitle stream size - please check" "err"
+              # no longer error: use later size comparison, ensuring no loss. Often happens in hard-subtitled foreign language films
+              echo
             fi
           fi
         fi
@@ -742,7 +757,7 @@ function transcode() {
 	  return 1
 	fi
     # Now re-test/compare after conversion in case ffmpeg lost some (still keep for examination in case really OK)...
-    # F_SUBS for VDR2 conversions, copyts for VDR1.x. Widened tolerance due to errors when re-transcoding
+    # F_SUBS for VDR2 conversions, copyts for VDR1.x. Widened (empirical) tolerance due to errors when re-transcoding
     if [ "$F_SUBS" ] || [ $copyts ]; then
       subslength $2 "/dev/null"
       [ $? -ne 0 ] && return 1
@@ -765,7 +780,7 @@ function transcode() {
 }
 
 #------------------------------------------------------------------------------
-# Basic QA of the output filesize/duration to make sure it's OK
+# Basic QA - duration to make sure it's OK
 # Return 1 for a fail, else 0
 
 function check_duration() {
@@ -775,11 +790,18 @@ function check_duration() {
     logit "Warning: $outfile, size $(($outputsize/$meg))M, is only $duration sec long, original $(($inputsize/$meg))M, with length detected as $program_duration sec" "err"
     return 1
   fi
+}
+
+#------------------------------------------------------------------------------
+# Basic QA - filesize
+# Return 1 for a fail, else 0
+
+function check_size() {
   # check for silly compression ratio, or larger file, heaven forbid!)
   if [ "$F_VIDEO" ]; then
     [ $vcodec -eq 262 ] && mult=3     # MPEG original
-    [ $vcodec -eq 264 ] && mult=9     # x264: 1/3 of original
-    [ $vcodec -eq 265 ] && mult=12    # x265 1/4 of original
+    [ $vcodec -eq 264 ] && mult=10    # x264: 30% of original
+    [ $vcodec -eq 265 ] && mult=14    # x265: 21% of original
     if [ $debug -eq 0 ] && [ $(($inputsize * 3)) -gt $(($outputsize * $mult)) -o $outputsize -gt $inputsize -a $maintain -eq 0 ]; then
       logit "Warning: Suspect size of $outfile, (new $(($outputsize/$meg))M vs. original $(($inputsize/$meg))M)" "err"
       # keep converted outfile, actually it may be OK
@@ -870,10 +892,10 @@ function escape_apostrophe() {
    echo $($1 | sed 's/"/\\\"/g')
 }
 
-# return key=value, escaped, but only if the value exists (alert missing ones)
+# return key=value, escaped, but only if the value exists (alert missing ones).
 function create_meta() {
 #   [ "$2" ] && echo "-metadata $1=\"$(echo $2|sed -e 's/[;\]//g'|sed "s/'/\\\'/g"|sed 's/"/\\\"/g')"\"||echo "NOTE: -metadata $1 is missing" 1>&2
-   [ "$2" ] && echo "-metadata $1=\"$(echo $2|sed -e "s/&quot;/\\\'/g"|sed -e 's/[;\]//g'|sed "s/\"/'/g")"\"||echo "NOTE: -metadata $1 is missing" 1>&2
+  [ "$2" ] && echo "-metadata $1=\"$(echo $2|sed -e "s/&quot;/\\\'/g" -e 's/[;\]//g' -e "s/[\`\"]/'/g")"\"||echo "NOTE: -metadata $1 is missing" 1>&2
 }
 
 function Repeat() {
@@ -927,6 +949,7 @@ while [ "$1" != "" ]; do
                                 top=$(echo "$1"|sed -e 's/[^0-9]//g')
                                 ;;
         -a | --acodec )         shift
+                                acodec_set=1
                                 acodec=$(echo "$1"|sed -e 's/[^a-z0-9_]//g')
                                 ;;
         -v | --vcodec )         shift
@@ -998,23 +1021,29 @@ done
 Repeat - 120 
 echo
 
-[ $vcodec -lt 264 ] || [ $vcodec -gt 265 ] && usage && exit 1
-[ $ext == "mp3" ] && acodec="libmp3lame"
+[ ! -d "$input" ] && logit "Recording directory '$input' doesn't exist!" && exit 1
 
 # ffmpeg exists?
 command -v $ffmpeg >/dev/null 2>&1 || { echo "$0 requires 'ffmpeg' but it's not in the path/config,  Aborting."; exit 1; }
 ffmpegbuild=$($ffmpeg 2>&1)  # get build options to check feature compatibility
 
-[ $vcodec -eq 264 ] && [ ! $(echo $ffmpegbuild | grep 'libx264') ] && logit "$0 requires ffmpeg built with at least libx264" && exit 1
-[ $vcodec -eq 265 ] && [ ! $(echo $ffmpegbuild | grep 'libx265') ] && logit "ffmpeg is not built with libx265" && exit 1
-[ $acodec = "libfdk_aac" ] && [ ! $(echo $ffmpegbuild | grep 'libfdk') ]  && logit "ffmpeg is not built with libfdk_aac for AAC" && exit 1
-[ $acodec = "libmp3lame" ] && [ ! $(echo $ffmpegbuild | grep 'libmp3lame') ]  && logit "ffmpeg is not built with libmp3lame for MP3" && exit 1
-
 # create deep probes
 ffmpeg="nice -n 19 "$ffmpeg" -y -hide_banner -nostats -probesize 250M -analyzeduration 600M -copytb 1"
 
-[ ! -d "$input" ] && logit "Recording directory '$input' doesn't exist!" && exit 1
-[ $dif ] && [ $dif -gt 1 ] && echo "deinterlacer config must be 0 or 1" && usage && exit 1
+# === video ===
+[ $vcodec -lt 264 ] || [ $vcodec -gt 265 ] && usage && exit 1
+[ $vcodec -eq 264 ] && [ ! $(echo $ffmpegbuild | grep 'libx264') ] && logit "$0 requires ffmpeg built with at least libx264" && exit 1
+[ $vcodec -eq 265 ] && [ ! $(echo $ffmpegbuild | grep 'libx265') ] && logit "ffmpeg is not built with libx265" && exit 1
+
+# === audio ===
+[ $ext = "mp3" ] && acodec="libmp3lame"
+# native aac and copy are built ins.
+[ $acodec != "aac" ] && [ $acodec != "copy" ] && [ ! $(echo $ffmpegbuild | grep -w $acodec) ] && logit "ffmpeg is not built with codec library '$acodec' - use exact library name" && exit 1
+ 
+# Silently use Fraunhofer in pref to built-in aac (if not explicitly set on cmd line)
+[ $acodec = "aac" ] && [ ! $acodec_set ] && [ $(echo $ffmpegbuild | grep 'libfdk') ] && acodec='libfdk_aac'
+# help Fraunhofer codec produce full(er) range - default cutoff 14kHz @low bitrates.
+[ $acodec = "libfdk_aac" ] && acodec="$acodec -cutoff 17000"
 
 if [ $keep -eq 1 ]; then
   command -v vdr >/dev/null 2>&1 || { echo "$0 requires 'vdr' but it's not in the path,  Aborting."; exit 1; }
@@ -1027,13 +1056,12 @@ if [ $xmit -gt 0 ]; then
   [ $xmit -gt 1 ] && { echo "$0 Cannot FTP and Redo! - Aborting."; exit 1; }
 fi
 
+[ $dif ] && [ $dif -gt 1 ] && echo "deinterlacer config must be 0 or 1" && usage && exit 1
+
 # *** Adjustments to interdependent parameters ***
 
 [ $ext == "mp4" ] || [ $ext == "avi" ] && [ $subs -eq 1 ] && subs=0 && logit "Warning: subs not supported in $ext format: discarded if present" "warn"
 [ $top -gt 0 ] && [ $maintain -eq 1 ] && echo "Can't crop without re-encoding" && exit 1
-
-# help Fraunhofer codec produce full(er) range - default cutoff 14kHz @low bitrates.
-[ $acodec == "libfdk_aac" ] && acodec="$acodec -cutoff 17000"
 
 if [ "$podcast" ]; then
   [ ! -d "$podcast" ] && logit "Podcast directory '"$podcast"' doesn't exist!" && exit 1
@@ -1123,6 +1151,7 @@ do
   ID[2]=$(echo "$line" |grep "^E" |cut -f3 -d" " |awk '{print strftime("%F-%a_%H-%M",$1)}')
  
   #resolution. Just look for HD in station name - a bit simplistic, but only used for file naming
+  PROVIDER=$(echo "$line" |grep "^C" |cut -f2 -d" ")
   CHAN=$(echo "$line" |grep "^C" |cut -f3-7 -d" ")
   HD=$(echo "$CHAN" |grep -o 'HD')
   fr=$(echo "$line" |grep "^F"|sed 's/[^0-9]*//g')
@@ -1148,8 +1177,7 @@ do
   pod_genrenum=$(echo "$line" |grep "^G" |cut -f2 -d" ")
   pod_presenters=$(echo "$line" |grep "^D" |grep -oP '(?<=Presenters: ).*' |cut -f1 -d"|")   # rarely
   pod_actors=$(echo "$line" |grep "^D" |grep -oP '(?<=Actors: ).*' |cut -f1 -d"|")   # often
-  pod_desc=$(echo "$line" |grep -oP '(?<=^D ).*' |cut -f1 -d"|")  # almost always, sadly usu. freeform!
-  
+  pod_desc=$(echo "$line" |grep -oP '(?<=^D ).*' |cut -f1 -d"|")  # almost always, sadly usu. freeform! 
   lifetime=$(echo "$line" |grep "^L" |sed 's/[^0-9]*//g')
 done
 
@@ -1296,7 +1324,7 @@ done
 
 # Map the last output file
 # Why? Sometimes a stream actually has no content (e.g. AD or subs),
-# even if the stream notionally existed when probed, ffmpeg usually drops it silently if empty,
+# even if the stream notionally existed when probed, ffmpeg can drop it silently if actually empty,
 # resulting in a different map in the output file. The transcode function may also drop null streams
 # ffmpeg still needs a specific map to copy more than just "the best" single audio & video stream.
 # For VDR1.x conversions, this also fixes the output stream mapping order 
@@ -1352,7 +1380,9 @@ else
       logit "Cannot create directory $outputdir/$TITLE, falling back to $outputdir" "warn"
     else
       outputdir="$outputdir/$TITLE"
-    fi      
+    fi
+    # Title has description concatenated so it shows in LMS scrolling title display
+    LONGTITLE="$LONGTITLE: $pod_desc"
   fi 
   for ((i=0; i<${#formats[*]}; i++));
   do
@@ -1361,7 +1391,7 @@ else
   # if marks present, convert to an EDL file
   [ -f "$input/marks$VDRtype" -a $redo -eq 0 ] && edl "$input/marks$VDRtype" "$outputdir/$BASENAME"
 fi
-
+   
 if [ $MERGEFILES ]; then
   result=0; results=0
   # Do merge(s)
@@ -1371,12 +1401,14 @@ if [ $MERGEFILES ]; then
       # add tag parameters for all recordings now (not just podcasts)
       # A number of these are gross approximations as metadata is poor - e.g. Album artist
       # language a bit approximate: individual streams have language tags, but not always shown
-      # Title has description concatenated so it shows in LMS scrolling title display - as some podcasts
       # MP4 likes "date" not "year" (ffmpeg docs wrong atm)
-      # ts has no metadata, ffmpeg silently drops
+      # ts/m2ts has only service provider + name, ffmpeg silently drops the rest
+      # https://patchwork.ffmpeg.org/patch/12047/ limits these to 255 bytes
+
       metadata=" \
-      "$(create_meta "service_provider" $CHAN)"\
-      "$(create_meta "title" "$LONGTITLE: $pod_desc")"\
+      "$(create_meta "service_provider" $PROVIDER)"\
+      "$(create_meta "service_name" $CHAN)"\
+      "$(create_meta "title" $LONGTITLE)"\
       "$(create_meta "year" $pod_year)"\
       "$(create_meta "date" $pod_year)"\
       "$(create_meta "album" $pod_album)"\
@@ -1401,6 +1433,7 @@ if [ $MERGEFILES ]; then
       cmd="$ffmpeg -i concat:"\"$MERGEFILES"\" $metadata -c copy $concatflags $map "\"$outfile"\" 2>> $LOGFILE"
       echo; Repeat - 120
       logit "Creating output with $cmd" "info"
+#      echo $cmd > "command.txt"
       sh -c $cmd
       result=$?
       [ $result -eq 0 ] && msg="OK" || msg="Fail"
@@ -1413,10 +1446,12 @@ if [ $MERGEFILES ]; then
     fi
   done
   if [ $results -eq 0 ]; then
-    check_duration       # basic QA
+    check_duration       # basic QA only. Skip size as may have used higher Q which is not tracked. Duration detects most errors
     [ $? -ne 0 ] && cleanup && quit 1
     # Extensive QA testing only when keeping
     if [ $keep -eq 1 ]; then
+      check_size
+      [ $? -ne 0 ] && cleanup && quit 1
       # Save video, force a VDR reindex and check it was really successful before deleting original files
       # VDR2 will only recognise .ts's in the NEW format of directory name
       if [ $VDRtype ]; then
@@ -1448,7 +1483,7 @@ if [ $MERGEFILES ]; then
         done
         mv -n "$input/index" "$input/index.orig" || logit "could not save index" "warn"
       fi
-      # Only a single ts after transcoding, (VDR will only check the file having replaced the originals!)
+      # Only a single file after transcoding, (VDR will only check the file having replaced the originals!)
       mv -f "$outfile" "$RECDIR/00001.ts" || logit "could not move .ts" "err"
       # Neatness, but importantly a check that VDR will be reasonably happy to play the file - otherwise bail
       sh -c "vdr --genindex "\"$RECDIR"\""
@@ -1513,4 +1548,4 @@ fi
 # remove lockfile
 quit 0
 
-# --------- $Id: vdr-convert,v 2.2 2018/09/12 12:10:10 richard Exp $ ---------- END
+# --------- $Id: vdr-convert,v 2.3 2019/04/03 13:02:04 richard Exp $ ---------- END
