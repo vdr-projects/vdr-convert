@@ -110,7 +110,9 @@ Get an up-to-date copy of ffmpeg, e.g.
 VDR
 ----
 VDR benefits from a couple of minor patches too:
+
 a) to suppress warnings when reindexing, and, at the time of writing
+
 b) to allow re-indexing of audio-only recordings.
 
 The patches are in the VDR patches subdirectory
