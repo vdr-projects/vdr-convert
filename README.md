@@ -3,13 +3,13 @@ VDR-convert Version 2.3
 =======================
 vdr-convert is a set of tools to accurately transcode VDR1.x and VDR2.x TV recordings, including all valid streams - video, audio (including AC3/DTS 5.1), Audio Description (AD), and DVB subtitles - into a more compressed and accessible format, while maintaining perceived quality with good compatibility. H264 and AAC are the default codecs for the main streams, but H265 is available from V2 onwards
 
-The user can leave the transcoded files in-place for use by VDR or use them with external players such as Kodi, MPC-HC, or VLC. 
+The user can leave the transcoded files in-place for use by VDR or use them with external players such as Kodi, MPC-HC, or VLC.
 
 Refer to the WIKI here for full usage instructions
-https://projects.vdr-developer.org/projects/vdr-convert/wiki
+https://github.com/vdr-projects/vdr-convert/wiki
 
 A new podcast mode was addd in V2.2:
-https://projects.vdr-developer.org/projects/vdr-convert/wiki/Podcast-mode
+https://github.com/vdr-projects/vdr-convert/wiki/Podcast-mode
 
 
 Software required
@@ -33,10 +33,10 @@ Make sure it's executable!
 
 There are a few parameters at the top of vdr-convert to configure:
 
-"ffmpeg" - set to the path of the version of ffmpeg you plan to use. 
+"ffmpeg" - set to the path of the version of ffmpeg you plan to use.
  (See "patching" below)
 
-"LOGFILE" - a place where detailed ffmpeg logs are kept, e.g. /var/log. 
+"LOGFILE" - a place where detailed ffmpeg logs are kept, e.g. /var/log.
  Make sure it's writable by whatever user you run vdr-convert under (e.g. vdr)
 
 "Log_facility" - identify where you want the script's syslog messages to be logged (default local2)
@@ -50,7 +50,7 @@ set default langauages if you are missing VDR "info" files.
 Default conversion parameters
 =============================
 Command line options may modify several of these, see
-https://projects.vdr-developer.org/projects/vdr-convert/wiki/Options)
+https://github.com/vdr-projects/vdr-convert/wiki/Options
 
 Note The H264/265 presets are chosen to be optimal at the time of writing based on testing and web reviews
 Optimal H265 presets have changed as H265 develops
@@ -59,11 +59,11 @@ Optimal H265 presets have changed as H265 develops
 So you use the familiar x264 CRF's with the -q option to acheive approx the same quality with x265
 
 "vcodec" 264 or 265 depending on your preference, and what your ffmpeg is built with.
-See https://projects.vdr-developer.org/projects/vdr-convert/wiki/Howto#H265
+See https://github.com/vdr-projects/vdr-convert/wiki/Howto#h265-hevc
 
-"acodec" set to libfdk_aac if you built and linked your ffmpeg with the non-free Fraunhofer AAC library 
+"acodec" set to libfdk_aac if you built and linked your ffmpeg with the non-free Fraunhofer AAC library
 
-"ext" is the default output file format/extension. 
+"ext" is the default output file format/extension.
 ts is always used for kept files, others are supported for single-use
 
 "podcastaudioprofile" is the codec config string for audio podcasts when the --podcast option is used
@@ -71,7 +71,7 @@ More description in the script itself - there are usable strings for default HE-
 
 "podcastcmd" defines podcast post processing commands, the default is for a local Squuezeserver (LMS)
 
-See https://projects.vdr-developer.org/projects/vdr-convert/wiki/Options
+See https://github.com/vdr-projects/vdr-convert/wiki/Options
 
 ----
 In batch.sh (if you use it)
@@ -102,7 +102,7 @@ You should consider patching ffmpeg if you have "broken" recordings - e.g where 
 To do this:
 Get an up-to-date copy of ffmpeg, e.g.
 * git clone https://git.ffmpeg.org/ffmpeg.git ffmpeg or see https://ffmpeg.org/download.html
-* build it using ffmpeg instructions 
+* build it using ffmpeg instructions
 * add the file FFMPEG-libavformat-reduce-exits-on-subs-error.patch to the libavformat subdirectory
 * patch -p1<FFMPEG-libavformat-reduce-exits-on-subs-error.patch
 * Rebuild (quick)
